@@ -28,7 +28,9 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.Pair;
+
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterators;
 
 /**
  * This Replication Strategy takes a property file that gives the intended
@@ -43,10 +45,14 @@ import org.apache.cassandra.utils.Pair;
  * This class also caches the Endpoints and invalidates the cache if there is a
  * change in the number of tokens.
  */
+@SuppressWarnings("unchecked")
 public class NetworkTopologyStrategy extends AbstractReplicationStrategy
 {
+    private static final int DF_ALL = 0;
+
     private final IEndpointSnitch snitch;
-    private final Map<String, Integer> datacenters;
+    private final Map<String, Integer> datacenterReplication;
+    private final Map<String, Integer> datacenterDistribution;
     private static final Logger logger = LoggerFactory.getLogger(NetworkTopologyStrategy.class);
 
     public NetworkTopologyStrategy(String table, TokenMetadata tokenMetadata, IEndpointSnitch snitch, Map<String, String> configOptions) throws ConfigurationException
@@ -54,7 +60,8 @@ public class NetworkTopologyStrategy extends AbstractReplicationStrategy
         super(table, tokenMetadata, snitch, configOptions);
         this.snitch = snitch;
 
-        Map<String, Integer> newDatacenters = new HashMap<String, Integer>();
+        Map<String, Integer> dcReplication = new HashMap<String, Integer>();
+        Map<String, Integer> dcDistribution = new HashMap<String, Integer>();
         if (configOptions != null)
         {
             for (Entry<String, String> entry : configOptions.entrySet())
@@ -62,60 +69,115 @@ public class NetworkTopologyStrategy extends AbstractReplicationStrategy
                 String dc = entry.getKey();
                 if (dc.equalsIgnoreCase("replication_factor"))
                     throw new ConfigurationException("replication_factor is an option for SimpleStrategy, not NetworkTopologyStrategy");
-                Integer replicas = Integer.valueOf(entry.getValue());
-                newDatacenters.put(dc, replicas);
+                String[] values = entry.getValue().split("/");
+                dcReplication.put(dc, Integer.valueOf(values[0]));
+                if (values.length > 1)
+                    dcDistribution.put(dc, Integer.valueOf(values[1]));
+                else
+                    dcDistribution.put(dc, DF_ALL);
             }
         }
 
-        datacenters = Collections.unmodifiableMap(newDatacenters);
-        logger.debug("Configured datacenter replicas are {}", FBUtilities.toString(datacenters));
+        datacenterReplication = Collections.unmodifiableMap(dcReplication);
+        datacenterDistribution = Collections.unmodifiableMap(dcDistribution);
+        logger.debug("Configured datacenter replicas are {}", FBUtilities.toString(datacenterReplication));
     }
 
+    /**
+     * By successively applying filters to the token iterator we can avoid TokenMetadata.updateNormalTokens
+     */
+    private interface TokenIteratorFactory
+    {
+        Iterator<Token> create(Token startToken);
+    }
+
+    private TokenIteratorFactory defaultTokenIterator(final TokenMetadata metadata)
+    {
+        return new TokenIteratorFactory()
+        {
+            @Override
+            public Iterator<Token> create(Token startToken)
+            {
+                return TokenMetadata.ringIterator(metadata.sortedTokens(), startToken, false);
+            }
+        };
+    }
+
+    private TokenIteratorFactory filteredByDatacenter(final TokenIteratorFactory fact, final TokenMetadata metadata, final String dc)
+    {
+        return new TokenIteratorFactory()
+        {
+            @Override
+            public Iterator<Token> create(Token startToken)
+            {
+                return Iterators.filter(fact.create(startToken), new Predicate<Token>()
+                {
+                    @Override
+                    public boolean apply(Token token)
+                    {
+                        return snitch.getDatacenter(metadata.getEndpoint(token)).equals(dc);
+                    }
+                });
+            }
+        };
+    }
+
+    private TokenIteratorFactory filteredByDistributionSet(final TokenIteratorFactory fact, final TokenMetadata metadata, final InetAddress endpoint)
+    {
+        int df = datacenterDistribution.get(snitch.getDatacenter(endpoint));
+        if (df == DF_ALL)
+            return fact;
+
+        // we calculate the distribution set for endpoint by taking the first (lowest) token belonging to
+        // endpoint and move around the ring collecting the next DF endpoints
+        // TODO: we could amortize O(NlogN) operations (adding tokens to TreeSet) if we memoize the distSet for each endpoint
+        Set<Token> tokens = new TreeSet<Token>(metadata.getTokens(endpoint));
+        Token firstToken = tokens.iterator().next();
+        final Set<InetAddress> distSet = nextDistinctEndpoints(metadata, fact, firstToken, df);
+
+        if (logger.isDebugEnabled())
+            logger.debug("replicas for endpoint {} restricted to the set {}",
+                         new Object[] { endpoint, StringUtils.join(distSet, ",")});
+
+        return new TokenIteratorFactory()
+        {
+            @Override
+            public Iterator<Token> create(Token startToken)
+            {
+                return Iterators.filter(fact.create(startToken), new Predicate<Token>()
+                {
+                    @Override
+                    public boolean apply(Token token)
+                    {
+                        return distSet.contains(metadata.getEndpoint(token));
+                    }
+                });
+            }
+        };
+    }
+
+    @Override
     public List<InetAddress> calculateNaturalEndpoints(Token searchToken, TokenMetadata tokenMetadata)
     {
         List<InetAddress> endpoints = new ArrayList<InetAddress>(getReplicationFactor());
 
-        for (Entry<String, Integer> dcEntry : datacenters.entrySet())
+        for (Entry<String, Integer> dcEntry : datacenterReplication.entrySet())
         {
             String dcName = dcEntry.getKey();
             int dcReplicas = dcEntry.getValue();
 
-            // collect endpoints in this DC; add in bulk to token meta data for computational complexity
-            // reasons (CASSANDRA-3831).
-            Set<Pair<Token, InetAddress>> dcTokensToUpdate = new HashSet<Pair<Token, InetAddress>>();
-            for (Entry<Token, InetAddress> tokenEntry : tokenMetadata.getTokenToEndpointMapForReading().entrySet())
-            {
-                if (snitch.getDatacenter(tokenEntry.getValue()).equals(dcName))
-                    dcTokensToUpdate.add(Pair.create(tokenEntry.getKey(), tokenEntry.getValue()));
-            }
-            TokenMetadata dcTokens = new TokenMetadata();
-            dcTokens.updateNormalTokens(dcTokensToUpdate);
+            TokenIteratorFactory it = defaultTokenIterator(tokenMetadata);
+            TokenIteratorFactory dcTokens = filteredByDatacenter(it, tokenMetadata, dcName);
 
-            List<InetAddress> dcEndpoints = new ArrayList<InetAddress>(dcReplicas);
-            Set<String> racks = new HashSet<String>();
-            // first pass: only collect replicas on unique racks
-            for (Iterator<Token> iter = TokenMetadata.ringIterator(dcTokens.sortedTokens(), searchToken, false);
-                 dcEndpoints.size() < dcReplicas && iter.hasNext(); )
-            {
-                Token token = iter.next();
-                InetAddress endpoint = dcTokens.getEndpoint(token);
-                String rack = snitch.getRack(endpoint);
-                if (!racks.contains(rack))
-                {
-                    dcEndpoints.add(endpoint);
-                    racks.add(rack);
-                }
-            }
+            // get the primary endpoint for this token in this DC
+            Iterator<Token> dcIterator = dcTokens.create(searchToken);
+            if (!dcIterator.hasNext())
+                continue;
+            InetAddress primaryEndpoint = tokenMetadata.getEndpoint(dcIterator.next());
 
-            // second pass: if replica count has not been achieved from unique racks, add nodes from duplicate racks
-            for (Iterator<Token> iter = TokenMetadata.ringIterator(dcTokens.sortedTokens(), searchToken, false);
-                 dcEndpoints.size() < dcReplicas && iter.hasNext(); )
-            {
-                Token token = iter.next();
-                InetAddress endpoint = dcTokens.getEndpoint(token);
-                if (!dcEndpoints.contains(endpoint))
-                    dcEndpoints.add(endpoint);
-            }
+            TokenIteratorFactory distSetTokens = filteredByDistributionSet(dcTokens, tokenMetadata, primaryEndpoint);
+
+            Set<InetAddress> dcEndpoints = nextDistinctEndpoints(tokenMetadata, distSetTokens, searchToken, dcReplicas);
 
             if (logger.isDebugEnabled())
                 logger.debug("{} endpoints in datacenter {} for token {} ",
@@ -126,29 +188,64 @@ public class NetworkTopologyStrategy extends AbstractReplicationStrategy
         return endpoints;
     }
 
+    private Set<InetAddress> nextDistinctEndpoints(TokenMetadata metadata, TokenIteratorFactory fact, Token startToken, int total)
+    {
+        HashSet<InetAddress> endpoints = new HashSet<InetAddress>(total);
+        // first pass: only collect replicas on unique racks
+        nextEndpoints(metadata, fact.create(startToken), total, true, endpoints);
+        // second pass: if replica count has not been achieved from unique racks, add nodes from duplicate racks
+        if (endpoints.size() < total)
+            nextEndpoints(metadata, fact.create(startToken), total, false, endpoints);
+        return endpoints;
+    }
+
+    private void nextEndpoints(TokenMetadata metadata, Iterator<Token> iter, int total, boolean distinctRack, Set<InetAddress> endpoints)
+    {
+        Set<String> racks = new HashSet<String>();
+        while (endpoints.size() < total && iter.hasNext())
+        {
+            Token token = iter.next();
+            InetAddress endpoint = metadata.getEndpoint(token);
+            String rack = snitch.getRack(endpoint);
+            if (!distinctRack || racks.add(rack))
+                endpoints.add(endpoint);
+        }
+    }
+
+    @Override
     public int getReplicationFactor()
     {
         int total = 0;
-        for (int repFactor : datacenters.values())
+        for (int repFactor : datacenterReplication.values())
             total += repFactor;
         return total;
     }
 
     public int getReplicationFactor(String dc)
     {
-        return datacenters.get(dc);
+        return datacenterReplication.get(dc);
     }
 
     public Set<String> getDatacenters()
     {
-        return datacenters.keySet();
+        return datacenterReplication.keySet();
     }
 
+    @Override
     public void validateOptions() throws ConfigurationException
     {
         for (Entry<String, String> e : this.configOptions.entrySet())
         {
-            validateReplicationFactor(e.getValue());
+            String[] values = e.getValue().split("/");
+            if (values.length < 1 || values.length > 2)
+                throw new ConfigurationException("Replication factor must be in the format \"rf/df\"");
+            validateReplicationFactor(values[0]);
+            if (values.length > 1)
+            {
+                validateReplicationFactor(values[1]);
+                if (Integer.parseInt(values[1]) < Integer.parseInt(values[0]))
+                    throw new ConfigurationException("Distribution factor must be greater than or equal to Replication factor.");
+            }
         }
 
     }
