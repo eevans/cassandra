@@ -1,7 +1,8 @@
-From: Eric Evans <eevans@apache.org>
-Subject: [PATCH] p/4122/01_bootstrap_decommission
+From: Sam Overton <sam@acunu.com>
+Subject: [PATCH] p/4123/01_replication_strategy
 
-Virtual nodes-aware bootstrap and decommission.  See CASSANDRA-4122
-(https://issues.apache.org/jira/browse/CASSANDRA-4122).
+NetworkTopologyStrategy optimized for vnodes with introduction of Distribution Factor concept
+See CASSANDRA-4123:
+(https://issues.apache.org/jira/browse/CASSANDRA-4123)
 
-Signed-off-by: Eric Evans <eevans@apache.org>
+Signed-off-by: Sam Overton <sam@acunu.com>
