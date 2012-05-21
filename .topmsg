@@ -1,6 +1,6 @@
 From: Sam Overton <sam@acunu.com>
-Subject: [PATCH] p/cassandra-1.1/4122/02_remove_tokens
+Subject: [PATCH] p/cassandra-1.1/4125/01_admin_tools
 
-1.1 backport of p/4122/02_remove_tokens
+1.1 backport of p/4125/01_admin_tools
 
 Signed-off-by: Sam Overton <sam@acunu.com>
