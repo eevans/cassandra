@@ -25,26 +25,37 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
-import javax.xml.parsers.ParserConfigurationException;
+import java.util.Set;
+import java.util.UUID;
+
+import junit.framework.Assert;
 
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.OrderPreservingPartitioner;
 import org.apache.cassandra.dht.StringToken;
 import org.apache.cassandra.dht.Token;
-import org.xml.sax.SAXException;
+import org.apache.cassandra.gms.ApplicationState;
+import org.apache.cassandra.gms.VersionedValue.VersionedValueFactory;
+import org.apache.cassandra.utils.Pair;
 
 public class NetworkTopologyStrategyTest
 {
     private String table = "Keyspace1";
+    private static final Logger logger = LoggerFactory.getLogger(NetworkTopologyStrategyTest.class);
 
     @Test
-    public void testProperties() throws IOException, ParserConfigurationException, SAXException, ConfigurationException
+    public void testProperties() throws IOException, ConfigurationException
     {
-        IEndpointSnitch snitch = new PropertyFileSnitch();
+        AbstractEndpointSnitch snitch = new PropertyFileSnitch();
         TokenMetadata metadata = new TokenMetadata();
-        createDummyTokens(metadata, true);
+        createDummyTokens(metadata, snitch, true);
 
         Map<String, String> configOptions = new HashMap<String, String>();
         configOptions.put("DC1", "3");
@@ -63,11 +74,11 @@ public class NetworkTopologyStrategyTest
     }
 
     @Test
-    public void testPropertiesWithEmptyDC() throws IOException, ParserConfigurationException, SAXException, ConfigurationException
+    public void testPropertiesWithEmptyDC() throws IOException, ConfigurationException
     {
-        IEndpointSnitch snitch = new PropertyFileSnitch();
+        AbstractEndpointSnitch snitch = new PropertyFileSnitch();
         TokenMetadata metadata = new TokenMetadata();
-        createDummyTokens(metadata, false);
+        createDummyTokens(metadata, snitch, false);
 
         Map<String, String> configOptions = new HashMap<String, String>();
         configOptions.put("DC1", "3");
@@ -85,32 +96,80 @@ public class NetworkTopologyStrategyTest
         assert 6 == new HashSet<InetAddress>(endpoints).size(); // ensure uniqueness
     }
 
-    public void createDummyTokens(TokenMetadata metadata, boolean populateDC3) throws UnknownHostException
+    @Test
+    public void testLargeCluster() throws UnknownHostException, ConfigurationException
     {
+        int[] dcRacks = new int[]{2, 4, 8};
+        int[] dcEndpoints = new int[]{128, 256, 512};
+        int[] dcReplication = new int[]{2, 6, 6};
+
+        IPartitioner<StringToken> partitioner = new OrderPreservingPartitioner();
+        AbstractEndpointSnitch snitch = new RackInferringSnitch();
+        TokenMetadata metadata = new TokenMetadata();
+        Map<String, String> configOptions = new HashMap<String, String>();
+        Set<Pair<Token, InetAddress>> tokens = new HashSet<Pair<Token, InetAddress>>();
+
+        int totalRF = 0;
+        for (int dc = 0; dc < dcRacks.length; ++dc)
+        {
+            totalRF += dcReplication[dc];
+            configOptions.put(Integer.toString(dc), Integer.toString(dcReplication[dc]));
+            for (int rack = 0; rack < dcRacks[dc]; ++rack)
+            {
+                for (int ep = 1; ep <= dcEndpoints[dc]/dcRacks[dc]; ++ep)
+                {
+                    byte[] ipBytes = new byte[]{10, (byte)dc, (byte)rack, (byte)ep};
+                    InetAddress address = InetAddress.getByAddress(ipBytes);
+                    StringToken token = new StringToken(String.format("%02x%02x%02x", ep, rack, dc));
+                    logger.debug("adding node " + address + " at " + token);
+                    snitch.onChange(address, ApplicationState.STATUS, new VersionedValueFactory(partitioner).normal(token, UUID.randomUUID()));
+                    tokens.add(new Pair<Token, InetAddress>(token, address));
+                }
+            }
+        }
+        metadata.updateNormalTokens(tokens);
+
+        NetworkTopologyStrategy strategy = new NetworkTopologyStrategy(table, metadata, snitch, configOptions);
+
+        for (String testToken : new String[]{"123456", "200000", "000402", "ffffff", "400200"})
+        {
+            List<InetAddress> endpoints = strategy.calculateNaturalEndpoints(new StringToken(testToken), metadata);
+            Set<InetAddress> epSet = new HashSet<InetAddress>(endpoints);
+
+            Assert.assertEquals(totalRF, endpoints.size());
+            Assert.assertEquals(totalRF, epSet.size());
+            logger.debug(testToken + ": " + endpoints.toString());
+        }
+    }
+
+    public void createDummyTokens(TokenMetadata metadata, AbstractEndpointSnitch snitch, boolean populateDC3) throws UnknownHostException
+    {
+        IPartitioner partitioner = new OrderPreservingPartitioner();
         // DC 1
-        tokenFactory(metadata, "123", new byte[]{ 10, 0, 0, 10 });
-        tokenFactory(metadata, "234", new byte[]{ 10, 0, 0, 11 });
-        tokenFactory(metadata, "345", new byte[]{ 10, 0, 0, 12 });
+        tokenFactory(metadata, snitch, partitioner, "123", new byte[]{ 10, 0, 0, 10 });
+        tokenFactory(metadata, snitch, partitioner, "234", new byte[]{ 10, 0, 0, 11 });
+        tokenFactory(metadata, snitch, partitioner, "345", new byte[]{ 10, 0, 0, 12 });
         // Tokens for DC 2
-        tokenFactory(metadata, "789", new byte[]{ 10, 20, 114, 10 });
-        tokenFactory(metadata, "890", new byte[]{ 10, 20, 114, 11 });
+        tokenFactory(metadata, snitch, partitioner, "789", new byte[]{ 10, 20, 114, 10 });
+        tokenFactory(metadata, snitch, partitioner, "890", new byte[]{ 10, 20, 114, 11 });
         //tokens for DC3
         if (populateDC3)
         {
-            tokenFactory(metadata, "456", new byte[]{ 10, 21, 119, 13 });
-            tokenFactory(metadata, "567", new byte[]{ 10, 21, 119, 10 });
+            tokenFactory(metadata, snitch, partitioner, "456", new byte[]{ 10, 21, 119, 13 });
+            tokenFactory(metadata, snitch, partitioner, "567", new byte[]{ 10, 21, 119, 10 });
         }
         // Extra Tokens
-        tokenFactory(metadata, "90A", new byte[]{ 10, 0, 0, 13 });
+        tokenFactory(metadata, snitch, partitioner, "90A", new byte[]{ 10, 0, 0, 13 });
         if (populateDC3)
-            tokenFactory(metadata, "0AB", new byte[]{ 10, 21, 119, 14 });
-        tokenFactory(metadata, "ABC", new byte[]{ 10, 20, 114, 15 });
+            tokenFactory(metadata, snitch, partitioner, "0AB", new byte[]{ 10, 21, 119, 14 });
+        tokenFactory(metadata, snitch, partitioner, "ABC", new byte[]{ 10, 20, 114, 15 });
     }
 
-    public void tokenFactory(TokenMetadata metadata, String token, byte[] bytes) throws UnknownHostException
+    public void tokenFactory(TokenMetadata metadata, AbstractEndpointSnitch snitch, IPartitioner partitioner, String token, byte[] bytes) throws UnknownHostException
     {
         Token token1 = new StringToken(token);
         InetAddress add1 = InetAddress.getByAddress(bytes);
         metadata.updateNormalToken(token1, add1);
+        snitch.onChange(add1, ApplicationState.STATUS, new VersionedValueFactory(partitioner).normal(token1, UUID.randomUUID()));
     }
 }
