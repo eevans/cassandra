@@ -202,13 +202,13 @@ public class VersionedValue implements Comparable<VersionedValue>
                 String[] pieces = value.value.split(DELIMITER_STR, -1);
                 String type = pieces[0];
 
-                if ((type == STATUS_NORMAL) || type == STATUS_BOOTSTRAPPING)
+                if ((type.equals(STATUS_NORMAL)) || type.equals(STATUS_BOOTSTRAPPING))
                 {
                     assert pieces.length >= 3;
                     outValue = versionString(pieces[0], pieces[2]);
                 }
 
-                if ((type == REMOVAL_COORDINATOR) || (type == REMOVING_TOKEN) || (type == REMOVED_TOKEN))
+                if ((type.equals(REMOVAL_COORDINATOR)) || (type.equals(REMOVING_TOKEN)) || (type.equals(REMOVED_TOKEN)))
                     throw new RuntimeException(String.format("Unable to serialize %s(%s...) for nodes older than 1.2",
                                                              VersionedValue.class.getName(),
                                                              type));
