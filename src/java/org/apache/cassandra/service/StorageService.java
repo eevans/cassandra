@@ -2442,7 +2442,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // This doesn't make any sense in a vnodes environment.
         if (getTokenMetadata().getTokens(localAddress).size() > 1)
         {
-            logger.error("Invalid request to move(Token); This node has more than one token and cannot be moved thusly.");
+            logger_.error("Invalid request to move(Token); This node has more than one token and cannot be moved thusly.");
             throw new UnsupportedOperationException("This node has more than one token and cannot be moved thusly.");
         }
         
