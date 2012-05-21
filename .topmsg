@@ -1,6 +1,6 @@
 From: Sam Overton <sam@acunu.com>
-Subject: [PATCH] p/cassandra-1.1/4125/01_admin_tools
+Subject: [PATCH] p/cassandra-1.1/4127/01_migration_path
 
-1.1 backport of p/4125/01_admin_tools
+1.1 backport of p/4127/01_migration_path
 
 Signed-off-by: Sam Overton <sam@acunu.com>
