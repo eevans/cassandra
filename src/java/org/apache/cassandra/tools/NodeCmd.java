@@ -50,6 +50,7 @@ public class NodeCmd
     private static final Pair<String, String> USERNAME_OPT = new Pair<String, String>("u",  "username");
     private static final Pair<String, String> PASSWORD_OPT = new Pair<String, String>("pw", "password");
     private static final Pair<String, String> TAG_OPT = new Pair<String, String>("t", "tag");
+    private static final Pair<String, String> TOKENS_OPT = new Pair<String, String>("T", "tokens");
     private static final Pair<String, String> PRIMARY_RANGE_OPT = new Pair<String, String>("pr", "partitioner-range");
     private static final Pair<String, String> SNAPSHOT_REPAIR_OPT = new Pair<String, String>("snapshot", "with-snapshot");
 
@@ -69,6 +70,7 @@ public class NodeCmd
         options.addOption(USERNAME_OPT, true, "remote jmx agent username");
         options.addOption(PASSWORD_OPT, true, "remote jmx agent password");
         options.addOption(TAG_OPT,      true, "optional name to give a snapshot");
+        options.addOption(TOKENS_OPT,   false, "display all tokens");
         options.addOption(PRIMARY_RANGE_OPT, false, "only repair the first range returned by the partitioner for the node");
         options.addOption(SNAPSHOT_REPAIR_OPT, false, "repair one node at a time using snapshots");
     }
@@ -84,6 +86,7 @@ public class NodeCmd
         CFSTATS,
         CLEANUP,
         CLEARSNAPSHOT,
+        CLUSTERINFO,
         COMPACT,
         COMPACTIONSTATS,
         DECOMMISSION,
@@ -96,7 +99,6 @@ public class NodeCmd
         GETCOMPACTIONTHRESHOLD,
         GETENDPOINTS,
         GOSSIPINFO,
-        IDS,
         INFO,
         INVALIDATEKEYCACHE,
         INVALIDATEROWCACHE,
@@ -138,9 +140,9 @@ public class NodeCmd
         // No args
         addCmdHelp(header, "ring", "Print informations on the token ring");
         addCmdHelp(header, "join", "Join the ring");
-        addCmdHelp(header, "info", "Print node informations (uptime, load, ...)");
+        addCmdHelp(header, "info [-T/--tokens]", "Print node informations (uptime, load, ...)");
+        addCmdHelp(header, "clusterinfo", "Print cluster informations (status, load, IDs, ...)");
         addCmdHelp(header, "cfstats", "Print statistics on column families");
-        addCmdHelp(header, "ids", "Print list of unique host IDs");
         addCmdHelp(header, "version", "Print cassandra version");
         addCmdHelp(header, "tpstats", "Print usage statistics of thread pools");
         addCmdHelp(header, "drain", "Drain the node (stop accepting writes and flush all column families)");
@@ -208,38 +210,21 @@ public class NodeCmd
      *
      * @param outs the stream to write to
      */
-    public void printRing(PrintStream outs, String keyspace)
+    public void printRing(PrintStream outs)
     {
         Map<String, String> tokenToEndpoint = probe.getTokenToEndpointMap();
         List<String> sortedTokens = new ArrayList<String>(tokenToEndpoint.keySet());
 
-        Collection<String> liveNodes = probe.getLiveNodes();
-        Collection<String> deadNodes = probe.getUnreachableNodes();
-        Collection<String> joiningNodes = probe.getJoiningNodes();
-        Collection<String> leavingNodes = probe.getLeavingNodes();
-        Collection<String> movingNodes = probe.getMovingNodes();
-        Map<String, String> loadMap = probe.getLoadMap();
-
-        String format = "%-16s%-12s%-12s%-7s%-8s%-16s%-20s%-44s%n";
+        String format = "%-16s%-12s%-12s%-8s%-44s%n";
+        outs.printf(format, "Address", "DC", "Rack", "Owns", "Token");
 
         // Calculate per-token ownership of the ring
-        Map<String, Float> ownerships;
-        try
-        {
-            ownerships = probe.effectiveOwnership(keyspace);
-            outs.printf(format, "Address", "DC", "Rack", "Status", "State", "Load", "Effective-Owership", "Token");
-        }
-        catch (ConfigurationException ex)
-        {
-            ownerships = probe.getOwnership();
-            outs.printf("Note: Ownership information does not include topology, please specify a keyspace. \n");
-            outs.printf(format, "Address", "DC", "Rack", "Status", "State", "Load", "Owns", "Token");
-        }
+        Map<String, Float> ownerships = probe.getOwnership();
 
         // show pre-wrap token twice so you can always read a node's range as
         // (previous line token, current line token]
         if (sortedTokens.size() > 1)
-            outs.printf(format, "", "", "", "", "", "", "", sortedTokens.get(sortedTokens.size() - 1));
+            outs.printf(format, "", "", "", "", sortedTokens.get(sortedTokens.size() - 1));
 
         for (String token : sortedTokens)
         {
@@ -262,40 +247,67 @@ public class NodeCmd
             {
                 rack = "Unknown";
             }
-            String status = liveNodes.contains(primaryEndpoint)
-                            ? "Up"
-                            : deadNodes.contains(primaryEndpoint)
-                              ? "Down"
-                              : "?";
 
-            String state = "Normal";
-
-            if (joiningNodes.contains(primaryEndpoint))
-                state = "Joining";
-            else if (leavingNodes.contains(primaryEndpoint))
-                state = "Leaving";
-            else if (movingNodes.contains(primaryEndpoint))
-                state = "Moving";
-
-            String load = loadMap.containsKey(primaryEndpoint)
-                          ? loadMap.get(primaryEndpoint)
-                          : "?";
             String owns = new DecimalFormat("##0.00%").format(ownerships.get(token) == null ? 0.0F : ownerships.get(token));
-            outs.printf(format, primaryEndpoint, dataCenter, rack, status, state, load, owns, token);
+            outs.printf(format, primaryEndpoint, dataCenter, rack, owns, token);
         }
     }
 
-    /** Writes a table of host IDs to a PrintStream */
-    public void printHostIds(PrintStream outs)
+    /** Writes a table of cluster-wide node information to a PrintStream */
+    public void printClusterInfo(PrintStream outs, String keyspace)
     {
-        System.out.print(String.format("%-16s %-7s %s%n", "Address", "Status", "Host ID"));
+        Collection<String> joiningNodes = probe.getJoiningNodes();
+        Collection<String> leavingNodes = probe.getLeavingNodes();
+        Collection<String> movingNodes = probe.getMovingNodes();
+        Map<String, String> loadMap = probe.getLoadMap();
+
+        String fmt;
+
+        // Calculate per-token ownership of the ring
+        Map<String, Float> ownerships;
+        try
+        {
+            ownerships = probe.effectiveOwnership(keyspace);
+            fmt = "%-16s %-7s %-8s %-10s %-7s %-16s %s%n";
+            outs.print(String.format(fmt, "Address", "Status", "State", "Load", "Tokens", "Owns (effective)", "Host ID"));
+        }
+        catch (ConfigurationException ex)
+        {
+            ownerships = probe.getOwnership();
+            fmt = "%-16s %-7s %-8s %-10s %-7s %-7s %s%n";
+            outs.printf("Warn: Ownership information does not include topology, please specify a keyspace. \n");
+            outs.print(String.format(fmt, "Address", "Status", "State", "Load", "Tokens", "Owns", "Host ID"));
+        }
+
         for (Map.Entry<String, String> entry : probe.getHostIdMap().entrySet())
         {
+            String endpoint = entry.getKey();
+
             String status;
-            if      (probe.getLiveNodes().contains(entry.getKey()))        status = "Up";
-            else if (probe.getUnreachableNodes().contains(entry.getKey())) status = "Down";
-            else                                                           status = "?";
-            System.out.print(String.format("%-16s %-7s %s%n", entry.getKey(), status, entry.getValue()));
+            if      (probe.getLiveNodes().contains(endpoint))        status = "Up";
+            else if (probe.getUnreachableNodes().contains(endpoint)) status = "Down";
+            else                                                     status = "?";
+
+            String state;
+            if      (joiningNodes.contains(endpoint)) state = "Joining";
+            else if (leavingNodes.contains(endpoint)) state = "Leaving";
+            else if (movingNodes.contains(endpoint))  state = "Moving";
+            else                                      state = "Normal";
+
+            String load = loadMap.containsKey(endpoint) ? loadMap.get(endpoint) : "?";
+
+            Float owns = 0.0F;
+            int numTokens = 0;
+            if ("Normal".equals(state))
+            {
+                List<String> tokens = probe.getTokens(endpoint);
+                for (String token : tokens)
+                    owns += (ownerships.get(token) == null) ? 0.0F : ownerships.get(token);
+                numTokens = tokens.size();
+            }
+
+            String strOwns = new DecimalFormat("##0.00%").format(owns);
+            outs.print(String.format(fmt, endpoint, status, state, load, numTokens, strOwns, entry.getValue()));
         }
     }
 
@@ -328,10 +340,18 @@ public class NodeCmd
      *
      * @param outs the stream to write to
      */
-    public void printInfo(PrintStream outs)
+    public void printInfo(PrintStream outs, ToolCommandLine cmd)
     {
         boolean gossipInitialized = probe.isInitialized();
-        outs.printf("%-17s: %s%n", "Token", probe.getToken());
+        List<String> toks = probe.getTokens();
+
+        // If there is just 1 token, print it now like we always have, otherwise,
+        // require that -T/--tokens be passed (that output is potentially verbose).
+        if (toks.size() == 1)
+            outs.printf("%-17s: %s%n", "Token", toks.get(0));
+        else if (!cmd.hasOption(TOKENS_OPT.left))
+            outs.printf("%-17s: (invoke with -T/--tokens to see all %d tokens)%n", "Token", toks.size());
+
         outs.printf("%-17s: %s%n", "ID", probe.getLocalHostId());
         outs.printf("%-17s: %s%n", "Gossip active", gossipInitialized);
         outs.printf("%-17s: %s%n", "Load", probe.getLoadString());
@@ -378,6 +398,12 @@ public class NodeCmd
                     cacheService.getRowCacheRequests(),
                     cacheService.getRowCacheRecentHitRate(),
                     cacheService.getRowCacheSavePeriodInSeconds());
+
+        if (toks.size() > 1 && cmd.hasOption(TOKENS_OPT.left))
+        {
+            for (String tok : toks)
+                outs.printf("%-17s: %s%n", "Token", tok);
+        }
     }
 
     public void printReleaseVersion(PrintStream outs)
@@ -686,12 +712,8 @@ public class NodeCmd
 
             switch (command)
             {
-                case RING :
-                    if (arguments.length > 0) { nodeCmd.printRing(System.out, arguments[0]); }
-                    else                      { nodeCmd.printRing(System.out, null); };
-                    break;
-
-                case INFO            : nodeCmd.printInfo(System.out); break;
+                case RING            : nodeCmd.printRing(System.out); break;
+                case INFO            : nodeCmd.printInfo(System.out, cmd); break;
                 case CFSTATS         : nodeCmd.printColumnFamilyStats(System.out); break;
                 case DECOMMISSION    : probe.decommission(); break;
                 case TPSTATS         : nodeCmd.printThreadPoolStats(System.out); break;
@@ -703,7 +725,11 @@ public class NodeCmd
                 case ENABLETHRIFT    : probe.startThriftServer(); break;
                 case STATUSTHRIFT    : nodeCmd.printIsThriftServerRunning(System.out); break;
                 case RESETLOCALSCHEMA: probe.resetLocalSchema(); break;
-                case IDS             : nodeCmd.printHostIds(System.out); break;
+
+                case CLUSTERINFO :
+                    if (arguments.length > 0) nodeCmd.printClusterInfo(System.out, arguments[0]);
+                    else                      nodeCmd.printClusterInfo(System.out, null);
+                    break;
 
                 case DRAIN :
                     try { probe.drain(); }
@@ -723,7 +749,15 @@ public class NodeCmd
 
                 case MOVE :
                     if (arguments.length != 1) { badUse("Missing token argument for move."); }
-                    probe.move(arguments[0]);
+                    try
+                    {
+                        probe.move(arguments[0]);
+                    }
+                    catch (UnsupportedOperationException uoerror)
+                    {
+                        System.err.println(uoerror.getMessage());
+                        System.exit(1);
+                    }
                     break;
 
                 case JOIN:
@@ -751,8 +785,9 @@ public class NodeCmd
                     probe.rebuild(arguments.length == 1 ? arguments[0] : null);
                     break;
 
-                case REMOVENODE  :
                 case REMOVETOKEN :
+                    System.err.println("Warn: removetoken is deprecated, please use removenode instead");
+                case REMOVENODE  :
                     if (arguments.length != 1) { badUse("Missing an argument for removenode (either status, force, or an ID)"); }
                     else if (arguments[0].equals("status")) { nodeCmd.printRemovalStatus(System.out); }
                     else if (arguments[0].equals("force"))  { nodeCmd.printRemovalStatus(System.out); probe.forceRemoveCompletion(); }

@@ -1752,9 +1752,28 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     /* These methods belong to the MBean interface */
 
+    @Deprecated
     public String getToken()
     {
         return getLocalToken().toString();
+    }
+
+    public List<String> getTokens()
+    {
+        return getTokens(FBUtilities.getBroadcastAddress());
+    }
+
+    public List<String> getTokens(String endpoint) throws UnknownHostException
+    {
+        return getTokens(InetAddress.getByName(endpoint));
+    }
+
+    private List<String> getTokens(InetAddress endpoint)
+    {
+        List<String> strTokens = new ArrayList<String>();
+        for (Token tok : getTokenMetadata().getTokens(endpoint))
+            strTokens.add(tok.toString());
+        return strTokens;
     }
 
     public String getReleaseVersion()
@@ -2419,6 +2438,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         // address of the current node
         InetAddress localAddress = FBUtilities.getBroadcastAddress();
+
+        // This doesn't make any sense in a vnodes environment.
+        if (getTokenMetadata().getTokens(localAddress).size() > 1)
+        {
+            logger.error("Invalid request to move(Token); This node has more than one token and cannot be moved thusly.");
+            throw new UnsupportedOperationException("This node has more than one token and cannot be moved thusly.");
+        }
+        
         List<String> tablesToProcess = Schema.instance.getNonSystemTables();
 
         // checking if data is moving to this node
