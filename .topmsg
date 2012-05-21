@@ -1,6 +1,6 @@
 From: Sam Overton <sam@acunu.com>
-Subject: [PATCH] p/cassandra-1.1/3881/00_snitch_topology
+Subject: [PATCH] p/cassandra-1.1/3881/01_calc_natural_endpoints
 
-1.1 backport of p/3881/00_snitch_topology
+1.1 backport of p/3881/01_calc_natural_endpoints
 
 Signed-off-by: Sam Overton <sam@acunu.com>
