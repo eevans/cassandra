@@ -109,6 +109,7 @@ public class Ec2Snitch extends AbstractNetworkTopologySnitch
     @Override
     public void gossiperStarting()
     {
+        super.gossiperStarting();
         // Share EC2 info via gossip.  We have to wait until Gossiper is initialized though.
         logger.info("Ec2Snitch adding ApplicationState ec2region=" + ec2region + " ec2zone=" + ec2zone);
         Gossiper.instance.addLocalApplicationState(ApplicationState.DC, StorageService.instance.valueFactory.datacenter(ec2region));
