@@ -1,6 +1,6 @@
 From: Sam Overton <sam@acunu.com>
-Subject: [PATCH] p/cassandra-1.1/4120/04_remove_node_by_hostid
+Subject: [PATCH] p/cassandra-1.1/3881/00_snitch_topology
 
-1.1 backport of p/4120/04_remove_node_by_hostid
+1.1 backport of p/3881/00_snitch_topology
 
 Signed-off-by: Sam Overton <sam@acunu.com>
