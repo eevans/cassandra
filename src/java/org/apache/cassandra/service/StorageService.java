@@ -1334,7 +1334,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             else if (VersionedValue.REMOVING_TOKEN.equals(state))
             {
                 if (logger_.isDebugEnabled())
-                    logger.debug("Tokens " + removeTokens + " removed manually (endpoint was " + endpoint + ")");
+                    logger_.debug("Tokens " + removeTokens + " removed manually (endpoint was " + endpoint + ")");
 
                 // Note that the endpoint is being removed
                 tokenMetadata_.addLeavingEndpoint(endpoint);
