@@ -1,6 +1,6 @@
 From: Sam Overton <sam@acunu.com>
-Subject: [PATCH] p/cassandra-1.1/4120/02_uuid_in_application_status
+Subject: [PATCH] p/cassandra-1.1/4120/03_reference_node_by_hostid
 
-1.1 backport of p/4120/02_uuid_in_application_status
+1.1 backport of p/4120/03_reference_node_by_hostid
 
 Signed-off-by: Sam Overton <sam@acunu.com>
