@@ -218,6 +218,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return getPrimaryRangeForEndpoint(FBUtilities.getBroadcastAddress());
     }
 
+    // For JMX's sake. Use getLocalPrimaryRange for internal uses
+    public List<String> getPrimaryRange()
+    {
+        return getLocalPrimaryRange().asList();
+    }
+
     private final Set<InetAddress> replicatingNodes = Collections.synchronizedSet(new HashSet<InetAddress>());
     private CassandraDaemon daemon;
 
@@ -1617,7 +1623,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                         }
                     }
 
-                    public void onFailure() {}
+                    public void onFailure()
+                    {
+                        logger_.warn("Streaming from " + source + " failed");
+                        onSuccess(); // calling onSuccess to send notification
+                    }
                 };
                 if (logger_.isDebugEnabled())
                     logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(ranges, ", "));
@@ -1785,7 +1795,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         return Schema.instance.getVersion().toString();
     }
-    
+
     public List<String> getLeavingNodes()
     {
         return stringify(tokenMetadata_.getLeavingEndpoints());
@@ -1926,14 +1936,39 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
 
         for (Table table : tables)
-            table.snapshot(tag);
+            table.snapshot(tag, null);
+    }
+
+    /**
+     * Takes the snapshot of a specific column family. A snapshot name must be specified.
+     *
+     * @param tableName the keyspace which holds the specified column family
+     * @param columnFamilyName the column family to snapshot
+     * @param tag the tag given to the snapshot; may not be null or empty
+     */
+    public void takeColumnFamilySnapshot(String tableName, String columnFamilyName, String tag) throws IOException
+    {
+        if (tableName == null)
+            throw new IOException("You must supply a table name");
+
+        if (columnFamilyName == null)
+            throw new IOException("You mus supply a column family name");
+
+        if (tag == null || tag.equals(""))
+            throw new IOException("You must supply a snapshot name.");
+
+        Table table = getValidTable(tableName);
+        if (table.snapshotExists(tag))
+            throw new IOException("Snapshot " + tag + " already exists.");
+
+        table.snapshot(tag, columnFamilyName);
     }
 
     private Table getValidTable(String tableName) throws IOException
     {
         if (!Schema.instance.getTables().contains(tableName))
         {
-            throw new IOException("Table " + tableName + "does not exist");
+            throw new IOException("Table " + tableName + " does not exist");
         }
         return Table.open(tableName);
     }
@@ -2087,6 +2122,29 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 logger_.error("Repair session " + future.session.getName() + " failed.", e);
                 throw new IOException("Some repair session(s) failed (see log for details).");
             }
+        }
+    }
+
+    public void forceTableRepairRange(String beginToken, String endToken, final String tableName, boolean isSequential, final String... columnFamilies) throws IOException
+    {
+        if (Table.SYSTEM_TABLE.equals(tableName))
+            return;
+
+        Token parsedBeginToken = getPartitioner().getTokenFactory().fromString(beginToken);
+        Token parsedEndToken = getPartitioner().getTokenFactory().fromString(endToken);
+
+        logger_.info("starting user-requested repair of range ({}, {}] for keyspace {} and column families {}",
+                     new Object[] {parsedBeginToken, parsedEndToken, tableName, columnFamilies});
+        AntiEntropyService.RepairFuture future = forceTableRepair(new Range<Token>(parsedBeginToken, parsedEndToken), tableName, isSequential, columnFamilies);
+        if (future == null)
+            return;
+        try
+        {
+            future.get();
+        }
+        catch (Exception e)
+        {
+            logger_.error("Repair session " + future.session.getName() + " failed.", e);
         }
     }
 
@@ -2371,10 +2429,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         calculatePendingRanges();
 
         Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.left(getLocalTokens(),Gossiper.computeExpireTime()));
-        logger_.info("Announcing that I have left the ring for " + RING_DELAY + "ms");
+        int delay = Math.max(RING_DELAY, Gossiper.intervalInMillis * 2);
+        logger_.info("Announcing that I have left the ring for " + delay + "ms");
         try
         {
-            Thread.sleep(RING_DELAY);
+            Thread.sleep(delay);
         }
         catch (InterruptedException e)
         {
@@ -2455,10 +2514,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 throw new UnsupportedOperationException("data is currently moving to this node; unable to leave the ring");
         }
 
-        // setting 'moving' application state
         Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.moving(newToken));
-
-        logger_.info(String.format("Moving %s from %s to %s.", localAddress, getLocalToken(), newToken));
+        setMode(Mode.MOVING, String.format("Moving %s from %s to %s.", localAddress, getLocalToken(), newToken), true);
 
         IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
 
@@ -2527,8 +2584,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         if (!rangesToStreamByTable.isEmpty() || !rangesToFetch.isEmpty())
         {
-            logger_.info("Sleeping {} ms before start streaming/fetching ranges.", RING_DELAY);
-
+            setMode(Mode.MOVING, String.format("Sleeping %s ms before start streaming/fetching ranges", RING_DELAY), true);
             try
             {
                 Thread.sleep(RING_DELAY);
@@ -2539,7 +2595,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
 
             setMode(Mode.MOVING, "fetching new ranges and streaming old ranges", true);
-
             if (logger_.isDebugEnabled())
                 logger_.debug("[Move->STREAMING] Work Map: " + rangesToStreamByTable);
 
@@ -2998,7 +3053,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                                 latch.countDown();
                         }
                     }
-                    public void onFailure() {}
+
+                    public void onFailure()
+                    {
+                        logger_.warn("Streaming to " + endPointEntry + " failed");
+                        onSuccess(); // calling onSuccess for latch countdown
+                    }
                 };
 
                 StageManager.getStage(Stage.STREAM).execute(new Runnable()
@@ -3050,7 +3110,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                             latch.countDown();
                     }
 
-                    public void onFailure() {}
+                    public void onFailure()
+                    {
+                        logger_.warn("Streaming from " + source + " failed");
+                        onSuccess(); // calling onSuccess for latch countdown
+                    }
                 };
 
                 if (logger_.isDebugEnabled())

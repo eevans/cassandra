@@ -106,7 +106,7 @@ public interface StorageServiceMBean
      */
     public String getSchemaVersion();
 
-    
+
     /**
      * Get the list of all data file locations from conf
      * @return String array of all locations
@@ -151,6 +151,11 @@ public interface StorageServiceMBean
      * @throws InvalidRequestException if there is no ring information available about keyspace
      */
     public List <String> describeRingJMX(String keyspace) throws InvalidRequestException;
+
+    /**
+     * Returns the local node's primary range.
+     */
+    public List<String> getPrimaryRange();
 
     /**
      * Retrieve a map of pending ranges to endpoints that describe the ring topology
@@ -212,6 +217,15 @@ public interface StorageServiceMBean
     public void takeSnapshot(String tag, String... tableNames) throws IOException;
 
     /**
+     * Takes the snapshot of a specific column family. A snapshot name must be specified.
+     *
+     * @param tableName the keyspace which holds the specified column family
+     * @param columnFamilyName the column family to snapshot
+     * @param tag the tag given to the snapshot; may not be null or empty
+     */
+    public void takeColumnFamilySnapshot(String tableName, String columnFamilyName, String tag) throws IOException;
+
+    /**
      * Remove the snapshot with the given name from the given tables.
      * If no tag is specified we will remove all snapshots.
      */
@@ -263,6 +277,14 @@ public interface StorageServiceMBean
      * Triggers proactive repair but only for the node primary range.
      */
     public void forceTableRepairPrimaryRange(String tableName, boolean isSequential, String... columnFamilies) throws IOException;
+
+    /**
+     * Perform repair of a specific range.
+     *
+     * This allows incremental repair to be performed by having an external controller submitting repair jobs.
+     * Note that the provided range much be a subset of one of the node local range.
+     */
+    public void forceTableRepairRange(String beginToken, String endToken, String tableName, boolean isSequential, String... columnFamilies) throws IOException;
 
     public void forceTerminateAllRepairSessions();
 
