@@ -62,9 +62,11 @@ import org.apache.cassandra.net.IAsyncResult;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ResponseVerbHandler;
+import org.apache.cassandra.service.AntiEntropyService.RepairFuture;
 import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
 import org.apache.cassandra.streaming.*;
 import org.apache.cassandra.thrift.*;
+import org.apache.cassandra.utils.BiMultiValMap;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.NodeId;
 import org.apache.cassandra.utils.Pair;
@@ -205,6 +207,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return getRangesForEndpoint(table, FBUtilities.getBroadcastAddress());
     }
 
+    public Collection<Range<Token>> getLocalPrimaryRanges()
+    {
+        return getPrimaryRangesForEndpoint(FBUtilities.getBroadcastAddress());
+    }
+
+    @Deprecated
     public Range<Token> getLocalPrimaryRange()
     {
         return getPrimaryRangeForEndpoint(FBUtilities.getBroadcastAddress());
@@ -1203,7 +1211,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.info("Node " + endpoint + " state jump to leaving");
             tokenMetadata_.updateNormalToken(token, endpoint);
         }
-        else if (!tokenMetadata_.getToken(endpoint).equals(token))
+        else if (!tokenMetadata_.getTokens(endpoint).contains(token))
         {
             logger_.warn("Node " + endpoint + " 'leaving' token mismatch. Long network partition?");
             tokenMetadata_.updateNormalToken(token, endpoint);
@@ -1373,7 +1381,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         TokenMetadata tm = StorageService.instance.getTokenMetadata();
         Multimap<Range<Token>, InetAddress> pendingRanges = HashMultimap.create();
-        Map<Token, InetAddress> bootstrapTokens = tm.getBootstrapTokens();
+        BiMultiValMap<Token, InetAddress> bootstrapTokens = tm.getBootstrapTokens();
         Set<InetAddress> leavingEndpoints = tm.getLeavingEndpoints();
 
         if (bootstrapTokens.isEmpty() && leavingEndpoints.isEmpty() && tm.getMovingEndpoints().isEmpty())
@@ -1410,11 +1418,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // allLeftMetadata and check in between what their ranges would be.
         synchronized (bootstrapTokens)
         {
-            for (Map.Entry<Token, InetAddress> entry : bootstrapTokens.entrySet())
+            for (InetAddress endpoint : bootstrapTokens.inverse().keySet())
             {
-                InetAddress endpoint = entry.getValue();
-
-                allLeftMetadata.updateNormalToken(entry.getKey(), endpoint);
+                Collection<Token> tokens = bootstrapTokens.inverse().get(endpoint);
+                
+                allLeftMetadata.updateNormalTokens(tokens, endpoint);
                 for (Range<Token> range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
                     pendingRanges.put(range, endpoint);
                 allLeftMetadata.removeEndpoint(endpoint);
@@ -2016,17 +2024,26 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (Table.SYSTEM_TABLE.equals(tableName))
             return;
 
-        AntiEntropyService.RepairFuture future = forceTableRepair(getLocalPrimaryRange(), tableName, isSequential, columnFamilies);
-        if (future == null)
-            return;
-        try
+        List<AntiEntropyService.RepairFuture> futures = new ArrayList<AntiEntropyService.RepairFuture>();
+        for (Range<Token> range : getLocalPrimaryRanges())
         {
-            future.get();
+            RepairFuture future = forceTableRepair(range, tableName, isSequential, columnFamilies);
+            if (future != null)
+                futures.add(future);
         }
-        catch (Exception e)
+        if (futures.isEmpty())
+            return;
+        for (AntiEntropyService.RepairFuture future : futures)
         {
-            logger_.error("Repair session " + future.session.getName() + " failed.", e);
-            throw new IOException("Some repair session(s) failed (see log for details).");
+            try
+            {
+                future.get();
+            }
+            catch (Exception e)
+            {
+                logger_.error("Repair session " + future.session.getName() + " failed.", e);
+                throw new IOException("Some repair session(s) failed (see log for details).");
+            }
         }
     }
 
@@ -2080,9 +2097,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * This method returns the predecessor of the endpoint ep on the identifier
      * space.
      */
-    InetAddress getPredecessor(InetAddress ep)
+    InetAddress getPredecessor(Token token)
     {
-        Token token = tokenMetadata_.getToken(ep);
         return tokenMetadata_.getEndpoint(tokenMetadata_.getPredecessor(token));
     }
 
@@ -2090,10 +2106,19 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * This method returns the successor of the endpoint ep on the identifier
      * space.
      */
-    public InetAddress getSuccessor(InetAddress ep)
+    public InetAddress getSuccessor(Token token)
     {
-        Token token = tokenMetadata_.getToken(ep);
         return tokenMetadata_.getEndpoint(tokenMetadata_.getSuccessor(token));
+    }
+
+    /**
+     * Get the primary ranges for the specified endpoint.
+     * @param ep endpoint we are interested in.
+     * @return collection of ranges for the specified endpoint.
+     */
+    public Collection<Range<Token>> getPrimaryRangesForEndpoint(InetAddress ep)
+    {
+        return tokenMetadata_.getPrimaryRangesFor(tokenMetadata_.getTokens(ep));
     }
 
     /**
@@ -2101,6 +2126,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * @param ep endpoint we are interested in.
      * @return range for the specified endpoint.
      */
+    @Deprecated
     public Range<Token> getPrimaryRangeForEndpoint(InetAddress ep)
     {
         return tokenMetadata_.getPrimaryRangeFor(tokenMetadata_.getToken(ep));
@@ -2773,8 +2799,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public Map<String, Float> getOwnership()
     {
-        List<Token> sortedTokens = new ArrayList<Token>(tokenMetadata_.getTokenToEndpointMapForReading().keySet());
-        Collections.sort(sortedTokens);
+        List<Token> sortedTokens = tokenMetadata_.sortedTokens();
         Map<Token, Float> token_map = getPartitioner().describeOwnership(sortedTokens);
         Map<String, Float> string_map = new HashMap<String, Float>();
         for(Map.Entry<Token, Float> entry : token_map.entrySet())
@@ -2782,6 +2807,23 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             string_map.put(entry.getKey().toString(), entry.getValue());
         }
         return string_map;
+    }
+
+    /**
+     * Starting at start, find the first token belonging to each endpoint in endpoints
+     * TODO: this makes the (large) assumption that the replication strategy works in the same way
+     * TODO: it would be more efficient and portable to add a method to AbstractReplicationStrategy which
+     *       gets the exact tokens replicating a range rather than just endpoints (eg. calculateNaturalTokens)
+     */
+    public Collection<Token> getNextTokensForEndpoints(Token start, Collection<InetAddress> endpoints)
+    {
+        Set<InetAddress> searchEps = new HashSet<InetAddress>(endpoints);
+        Iterator<Token> it = tokenMetadata_.ringIterator(tokenMetadata_.sortedTokens(), start, false);
+        List<Token> tokens = new ArrayList<Token>(endpoints.size());
+        for (Token next = it.next(); it.hasNext() && !searchEps.isEmpty(); next = it.next())
+            if (searchEps.remove(tokenMetadata_.getEndpoint(next)))
+                tokens.add(next);
+        return tokens;
     }
 
     public Map<String, Float> effectiveOwnership(String keyspace) throws ConfigurationException
@@ -2795,17 +2837,18 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (keyspace == null)
             keyspace = Schema.instance.getNonSystemTables().get(0);
 
-        List<Token> sortedTokens = new ArrayList<Token>(tokenMetadata_.getTokenToEndpointMapForReading().keySet());
-        Collections.sort(sortedTokens);
+        List<Token> sortedTokens = tokenMetadata_.sortedTokens();
         Map<Token, Float> ownership = getPartitioner().describeOwnership(sortedTokens);
 
-        for (Entry<InetAddress, Collection<Range<Token>>> ranges : constructEndpointToRangeMap(keyspace).entrySet())
+        Map<Range<Token>, List<InetAddress>> rangeToEndpointMap = constructRangeToEndpointMap(keyspace, getAllRanges(sortedTokens));
+        for (Entry<Range<Token>, List<InetAddress>> ranges : rangeToEndpointMap.entrySet())
         {
-            Token token = tokenMetadata_.getToken(ranges.getKey());
-            for (Range<Token> range: ranges.getValue())
+            Range<Token> range = ranges.getKey();
+            Collection<Token> replicaTokens = getNextTokensForEndpoints(range.right, ranges.getValue());
+            for (Token token : replicaTokens)
             {
                 float value = effective.get(token.toString()) == null ? 0.0F : effective.get(token.toString());
-                effective.put(token.toString(), value + ownership.get(range.left));
+                effective.put(token.toString(), value + ownership.get(range.right));
             }
         }
         return effective;
@@ -3121,7 +3164,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public List<String> getRangeKeySample()
     {
-        List<DecoratedKey> keys = keySamples(ColumnFamilyStore.allUserDefined(), getLocalPrimaryRange());
+        List<DecoratedKey> keys = new ArrayList<DecoratedKey>();
+        for (Range<Token> range : getLocalPrimaryRanges())
+            keys.addAll(keySamples(ColumnFamilyStore.allUserDefined(), range));
 
         List<String> sampledKeys = new ArrayList<String>(keys.size());
         for (DecoratedKey key : keys)
