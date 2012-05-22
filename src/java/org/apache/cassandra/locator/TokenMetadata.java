@@ -34,6 +34,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.service.StorageService;
 
 public class TokenMetadata
@@ -42,6 +43,9 @@ public class TokenMetadata
 
     /* Maintains token to endpoint map of every node in the cluster. */
     private BiMap<Token, InetAddress> tokenToEndpointMap;
+
+    /* Maintains endpoint to host ID map of every node in the cluster */
+    private final BiMap<InetAddress, UUID> endpointToHostIdMap;
 
     // Prior to CASSANDRA-603, we just had <tt>Map<Range, InetAddress> pendingRanges<tt>,
     // which was added to when a node began bootstrap and removed from when it finished.
@@ -94,6 +98,7 @@ public class TokenMetadata
         if (tokenToEndpointMap == null)
             tokenToEndpointMap = HashBiMap.create();
         this.tokenToEndpointMap = tokenToEndpointMap;
+        endpointToHostIdMap = HashBiMap.create();
         sortedTokens = sortTokens();
     }
 
@@ -171,6 +176,51 @@ public class TokenMetadata
         {
             lock.writeLock().unlock();
         }
+    }
+
+    /**
+     * Store an end-point to host ID mapping.  Each ID must be unique, and
+     * cannot be changed after the fact.
+     *
+     * @param hostId
+     * @param endpoint
+     */
+    public void updateHostId(UUID hostId, InetAddress endpoint)
+    {
+        assert hostId != null;
+        assert endpoint != null;
+
+        InetAddress storedEp = endpointToHostIdMap.inverse().get(hostId);
+        if (storedEp != null)
+        {
+            if (!storedEp.equals(endpoint) && (FailureDetector.instance.isAlive(storedEp)))
+            {
+                throw new RuntimeException(String.format("Host ID collision between active endpoint %s and %s (id=%s)",
+                                                         storedEp,
+                                                         endpoint,
+                                                         hostId));
+            }
+        }
+
+        UUID storedId = endpointToHostIdMap.get(endpoint);
+        if ((storedId != null) && (!storedId.equals(hostId)))
+            logger.warn("Changing {}'s host ID from {} to {}", new Object[] {endpoint, storedId, hostId});
+
+        endpointToHostIdMap.forcePut(endpoint, hostId);
+    }
+
+    /** Return the unique host ID for an end-point. */
+    public UUID getHostId(InetAddress endpoint)
+    {
+        return endpointToHostIdMap.get(endpoint);
+    }
+
+    /** @return a copy of the endpoint-to-id map for read-only operations */
+    public Map<InetAddress, UUID> getEndpointToHostIdMapForReading()
+    {
+        Map<InetAddress, UUID> readMap = new HashMap<InetAddress, UUID>();
+        readMap.putAll(endpointToHostIdMap);
+        return readMap;
     }
 
     public void addBootstrapToken(Token token, InetAddress endpoint)
@@ -261,6 +311,7 @@ public class TokenMetadata
             bootstrapTokens.inverse().remove(endpoint);
             tokenToEndpointMap.inverse().remove(endpoint);
             leavingEndpoints.remove(endpoint);
+            endpointToHostIdMap.remove(endpoint);
             sortedTokens = sortTokens();
             invalidateCaches();
         }
@@ -608,6 +659,7 @@ public class TokenMetadata
         tokenToEndpointMap.clear();
         leavingEndpoints.clear();
         pendingRanges.clear();
+        endpointToHostIdMap.clear();
         invalidateCaches();
     }
 
