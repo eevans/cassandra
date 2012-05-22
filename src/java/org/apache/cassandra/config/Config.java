@@ -79,6 +79,7 @@ public class Config
     public Integer thrift_max_message_length_in_mb = 16;
     public Integer thrift_framed_transport_size_in_mb = 15;
     public Boolean snapshot_before_compaction = false;
+    public Boolean auto_snapshot = true;
 
     /* if the size of columns or super-columns are more than this, indexing will kick in */
     public Integer column_index_size_in_kb = 64;
@@ -101,6 +102,7 @@ public class Config
     public CommitLogSync commitlog_sync;
     public Double commitlog_sync_batch_window_in_ms;
     public Integer commitlog_sync_period_in_ms;
+    public int commitlog_segment_size_in_mb = 128;
 
     public String endpoint_snitch;
     public Boolean dynamic_snitch = true;
@@ -135,6 +137,7 @@ public class Config
     public int row_cache_save_period = 0;
     public int row_cache_keys_to_save = Integer.MAX_VALUE;
     public String row_cache_provider = ConcurrentLinkedHashCacheProvider.class.getSimpleName();
+    public boolean populate_io_cache_on_flush = false;
 
     private static boolean loadYaml = true;
     private static boolean outboundBindAny = false;
