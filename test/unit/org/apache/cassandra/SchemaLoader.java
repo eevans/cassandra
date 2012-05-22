@@ -28,6 +28,7 @@ import com.google.common.base.Charsets;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.gms.Gossiper;
@@ -129,6 +130,7 @@ public class SchemaLoader
             UTF8Type.instance,
             null,
             null,
+            null,
             null));
         Map<ByteBuffer, ColumnDefinition> utf8Column = new HashMap<ByteBuffer, ColumnDefinition>();
         utf8Column.put(UTF8Type.instance.fromString("fortytwo"), new ColumnDefinition(
@@ -136,7 +138,12 @@ public class SchemaLoader
             IntegerType.instance,
             null,
             null,
+            null,
             null));
+
+        // Make it easy to test leveled compaction
+        Map<String, String> leveledOptions = new HashMap<String, String>();
+        leveledOptions.put("sstable_size_in_mb", "1");
 
         // Keyspace 1
         schema.add(KSMetaData.testMetadata(ks1,
@@ -196,7 +203,9 @@ public class SchemaLoader
                                                           "StandardDynamicComposite",
                                                           st,
                                                           dynamicComposite,
-                                                          null)));
+                                                          null),
+                                           standardCFMD(ks1, "StandardLeveled").compactionStrategyClass(LeveledCompactionStrategy.class)
+                                                                               .compactionStrategyOptions(leveledOptions)));
 
         // Keyspace 2
         schema.add(KSMetaData.testMetadata(ks2,
@@ -307,7 +316,7 @@ public class SchemaLoader
                    {{
                         ByteBuffer cName = ByteBuffer.wrap("birthdate".getBytes(Charsets.UTF_8));
                         IndexType keys = withIdxType ? IndexType.KEYS : null;
-                        put(cName, new ColumnDefinition(cName, LongType.instance, keys, null, withIdxType ? ByteBufferUtil.bytesToHex(cName) : null));
+                        put(cName, new ColumnDefinition(cName, LongType.instance, keys, null, withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, null));
                     }});
     }
     private static CFMetaData jdbcCFMD(String ksName, String cfName, AbstractType comp)

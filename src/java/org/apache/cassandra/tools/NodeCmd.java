@@ -24,6 +24,7 @@ package org.apache.cassandra.tools;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.management.MemoryUsage;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.text.DecimalFormat;
@@ -38,6 +39,7 @@ import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutorMBean;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
+import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.thrift.InvalidRequestException;
 import org.apache.cassandra.utils.EstimatedHistogram;
@@ -45,6 +47,7 @@ import org.apache.cassandra.utils.Pair;
 
 public class NodeCmd
 {
+    private static final Pair<String, String> SNAPSHOT_COLUMNFAMILY_OPT = new Pair<String, String>("cf", "column-family");
     private static final Pair<String, String> HOST_OPT = new Pair<String, String>("h", "host");
     private static final Pair<String, String> PORT_OPT = new Pair<String, String>("p", "port");
     private static final Pair<String, String> USERNAME_OPT = new Pair<String, String>("u",  "username");
@@ -64,6 +67,7 @@ public class NodeCmd
     {
         options = new ToolOptions();
 
+        options.addOption(SNAPSHOT_COLUMNFAMILY_OPT, true, "only take a snapshot of the specified column family");
         options.addOption(HOST_OPT,     true, "node hostname or ip address");
         options.addOption(PORT_OPT,     true, "remote jmx agent port number");
         options.addOption(USERNAME_OPT, true, "remote jmx agent username");
@@ -135,15 +139,15 @@ public class NodeCmd
         StringBuilder header = new StringBuilder();
         header.append("\nAvailable commands:\n");
         // No args
-        addCmdHelp(header, "ring", "Print informations on the token ring");
+        addCmdHelp(header, "ring", "Print information about the token ring");
         addCmdHelp(header, "join", "Join the ring");
-        addCmdHelp(header, "info", "Print node informations (uptime, load, ...)");
+        addCmdHelp(header, "info", "Print node information (uptime, load, ...)");
         addCmdHelp(header, "cfstats", "Print statistics on column families");
         addCmdHelp(header, "ids", "Print list of unique host IDs");
         addCmdHelp(header, "version", "Print cassandra version");
         addCmdHelp(header, "tpstats", "Print usage statistics of thread pools");
         addCmdHelp(header, "drain", "Drain the node (stop accepting writes and flush all column families)");
-        addCmdHelp(header, "decommission", "Decommission the node");
+        addCmdHelp(header, "decommission", "Decommission the *node I am connecting to*");
         addCmdHelp(header, "compactionstats", "Print statistics on compactions");
         addCmdHelp(header, "disablegossip", "Disable gossip (effectively marking the node dead)");
         addCmdHelp(header, "enablegossip", "Reenable gossip");
@@ -166,7 +170,7 @@ public class NodeCmd
         addCmdHelp(header, "rebuild [src-dc-name]", "Rebuild data by streaming from other nodes (similarly to bootstrap)");
 
         // Two args
-        addCmdHelp(header, "snapshot [keyspaces...] -t [snapshotName]", "Take a snapshot of the specified keyspaces using optional name snapshotName");
+        addCmdHelp(header, "snapshot [keyspaces...] -cf [columnfamilyName] -t [snapshotName]", "Take a snapshot of the optionally specified column family of the specified keyspaces using optional name snapshotName");
         addCmdHelp(header, "clearsnapshot [keyspaces...] -t [snapshotName]", "Remove snapshots for the specified keyspaces. Either remove all snapshots or remove the snapshots with the given name.");
         addCmdHelp(header, "flush [keyspace] [cfnames]", "Flush one or more column family");
         addCmdHelp(header, "repair [keyspace] [cfnames]", "Repair one or more column family (use -pr to repair only the first range returned by the partitioner)");
@@ -226,7 +230,7 @@ public class NodeCmd
         try
         {
             ownerships = probe.effectiveOwnership(keyspace);
-            outs.printf(format, "Address", "DC", "Rack", "Status", "State", "Load", "Effective-Owership", "Token");
+            outs.printf(format, "Address", "DC", "Rack", "Status", "State", "Load", "Effective-Ownership", "Token");
         }
         catch (ConfigurationException ex)
         {
@@ -333,6 +337,7 @@ public class NodeCmd
         outs.printf("%-17s: %s%n", "Token", probe.getToken());
         outs.printf("%-17s: %s%n", "ID", probe.getLocalHostId());
         outs.printf("%-17s: %s%n", "Gossip active", gossipInitialized);
+        outs.printf("%-17s: %s%n", "Thrift active", probe.isThriftServerRunning());
         outs.printf("%-17s: %s%n", "Load", probe.getLoadString());
         if (gossipInitialized)
             outs.printf("%-17s: %s%n", "Generation No", probe.getCurrentGenerationNumber());
@@ -465,17 +470,29 @@ public class NodeCmd
 
     public void printCompactionStats(PrintStream outs)
     {
+        int compactionThroughput = probe.getCompactionThroughput();
         CompactionManagerMBean cm = probe.getCompactionManagerProxy();
         outs.println("pending tasks: " + cm.getPendingTasks());
         if (cm.getCompactions().size() > 0)
             outs.printf("%25s%16s%16s%16s%16s%10s%n", "compaction type", "keyspace", "column family", "bytes compacted", "bytes total", "progress");
+        long remainingBytes = 0;
         for (Map<String, String> c : cm.getCompactions())
         {
             String percentComplete = new Long(c.get("totalBytes")) == 0
                                    ? "n/a"
                                    : new DecimalFormat("0.00").format((double) new Long(c.get("bytesComplete")) / new Long(c.get("totalBytes")) * 100) + "%";
             outs.printf("%25s%16s%16s%16s%16s%10s%n", c.get("taskType"), c.get("keyspace"), c.get("columnfamily"), c.get("bytesComplete"), c.get("totalBytes"), percentComplete);
+            if (c.get("taskType").equals(OperationType.COMPACTION.toString()))
+                remainingBytes += (new Long(c.get("totalBytes")) - new Long(c.get("bytesComplete")));
         }
+        long remainingTimeInSecs = compactionThroughput == 0 || remainingBytes == 0
+                        ? -1 
+                        : (remainingBytes) / (long) (1024L * 1024L * compactionThroughput);
+        String remainingTime = remainingTimeInSecs < 0 
+                        ? "n/a"
+                        : String.format("%dh%02dm%02ds", remainingTimeInSecs / 3600, (remainingTimeInSecs % 3600) / 60, (remainingTimeInSecs % 60)); 
+
+        outs.printf("%25s%10s%n", "Active compaction remaining time : ", remainingTime);
     }
 
     public void printColumnFamilyStats(PrintStream outs)
@@ -662,7 +679,21 @@ public class NodeCmd
         }
         catch (IOException ioe)
         {
-            err(ioe, "Error connection to remote JMX agent!");
+            Throwable inner = findInnermostThrowable(ioe);
+            if (inner instanceof ConnectException)
+            {
+                System.err.printf("Failed to connect to '%s:%d': %s\n", host, port, inner.getMessage());
+                System.exit(1);
+            }
+            else if (inner instanceof UnknownHostException)
+            {
+                System.err.printf("Cannot resolve '%s': unknown host\n", host);
+                System.exit(1);
+            }
+            else
+            {
+                err(ioe, "Error connecting to remote JMX agent!");
+            }
         }
         try
         {
@@ -682,6 +713,8 @@ public class NodeCmd
 
             // Execute the requested command.
             String[] arguments = cmd.getCommandArguments();
+            String tag;
+            String columnFamilyName = null;
 
             switch (command)
             {
@@ -692,7 +725,6 @@ public class NodeCmd
 
                 case INFO            : nodeCmd.printInfo(System.out); break;
                 case CFSTATS         : nodeCmd.printColumnFamilyStats(System.out); break;
-                case DECOMMISSION    : probe.decommission(); break;
                 case TPSTATS         : nodeCmd.printThreadPoolStats(System.out); break;
                 case VERSION         : nodeCmd.printReleaseVersion(System.out); break;
                 case COMPACTIONSTATS : nodeCmd.printCompactionStats(System.out); break;
@@ -703,6 +735,15 @@ public class NodeCmd
                 case STATUSTHRIFT    : nodeCmd.printIsThriftServerRunning(System.out); break;
                 case RESETLOCALSCHEMA: probe.resetLocalSchema(); break;
                 case IDS             : nodeCmd.printHostIds(System.out); break;
+
+                case DECOMMISSION :
+                    if (arguments.length > 0)
+                    {
+                        System.err.println("Decommission will decommission the node you are connected to and does not take arguments!");
+                        System.exit(1);
+                    }
+                    probe.decommission();
+                    break;
 
                 case DRAIN :
                     try { probe.drain(); }
@@ -715,9 +756,11 @@ public class NodeCmd
                     break;
 
                 case SNAPSHOT :
+                    columnFamilyName = cmd.getOptionValue(SNAPSHOT_COLUMNFAMILY_OPT.left);
+                    /* FALL THRU */
                 case CLEARSNAPSHOT :
-                    String tag = cmd.getOptionValue(TAG_OPT.left);
-                    handleSnapshots(command, tag, arguments, probe);
+                    tag = cmd.getOptionValue(TAG_OPT.left);
+                    handleSnapshots(command, tag, arguments, columnFamilyName, probe);
                     break;
 
                 case MOVE :
@@ -855,6 +898,12 @@ public class NodeCmd
         System.exit(0);
     }
 
+    private static Throwable findInnermostThrowable(Throwable ex)
+    {
+        Throwable inner = ex.getCause();
+        return inner == null ? ex : findInnermostThrowable(inner);
+    }
+
     private void printDescribeRing(String keyspaceName, PrintStream out)
     {
         out.println("Schema Version:" + probe.getSchemaVersion());
@@ -909,7 +958,7 @@ public class NodeCmd
         }
     }
 
-    private static void handleSnapshots(NodeCommand nc, String tag, String[] cmdArgs, NodeProbe probe) throws InterruptedException, IOException
+    private static void handleSnapshots(NodeCommand nc, String tag, String[] cmdArgs, String columnFamily, NodeProbe probe) throws InterruptedException, IOException
     {
         String[] keyspaces = Arrays.copyOfRange(cmdArgs, 0, cmdArgs.length);
         System.out.print("Requested snapshot for: ");
@@ -920,7 +969,12 @@ public class NodeCmd
         }
         else
         {
-            System.out.print("all keyspaces");
+            System.out.print("all keyspaces ");
+        }
+
+        if (columnFamily != null)
+        {
+            System.out.print("and column family: " + columnFamily);
         }
         System.out.println();
 
@@ -929,7 +983,7 @@ public class NodeCmd
             case SNAPSHOT :
                 if (tag == null || tag.equals(""))
                     tag = new Long(System.currentTimeMillis()).toString();
-                probe.takeSnapshot(tag, keyspaces);
+                probe.takeSnapshot(tag, columnFamily, keyspaces);
                 System.out.println("Snapshot directory: " + tag);
                 break;
             case CLEARSNAPSHOT :
