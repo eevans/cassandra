@@ -17,7 +17,7 @@
  ~ specific language governing permissions and limitations
  ~ under the License.
  -->
-<project basedir="." default="build" name="apache-cassandra"
+<project basedir="." default="jar" name="apache-cassandra"
          xmlns:artifact="antlib:org.apache.maven.artifact.ant">
     <property environment="env"/>
     <property file="build.properties" />
@@ -25,7 +25,7 @@
     <property name="debuglevel" value="source,lines,vars"/>
 
     <!-- default version and SCM information -->
-    <property name="base.version" value="1.1.0-beta2"/>
+    <property name="base.version" value="1.1.0"/>
     <property name="scm.connection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.developerConnection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.url" value="http://git-wip-us.apache.org/repos/asf?p=cassandra.git;a=tree"/>
@@ -190,16 +190,14 @@
        This generates the CQL grammar files from Cql.g
     -->
     <target name="check-gen-cql-grammar">
-      <uptodate property="cqlcurrent" 
-                srcfile="${build.src.java}/org/apache/cassandra/cql/Cql.g" 
-                targetfile="${build.src.gen-java}/org/apache/cassandra/cql/Cql.tokens"/>
-      <uptodate property="cqlcurrent"
-                srcfile="${build.src.java}/org/apache/cassandra/cql3/Cql.g"
-                targetfile="${build.src.gen-java}/org/apache/cassandra/cql3/Cql.tokens"/>
+      <uptodate property="cqlcurrent">
+        <srcfiles dir="${build.src.java}" includes="org/apache/cassandra/cql*/Cql.g"/>
+        <mapper type="glob" from="*.g" to="*.tokens"/>
+      </uptodate>
     </target>
  
     <target name="gen-cql-grammar" depends="check-gen-cql-grammar" unless="cqlcurrent">
-      <echo>Building Grammar ${build.src.java}/org/apache/cassandra/cql/Cql.g  ...</echo>
+      <echo>Building Grammar ${build.src.java}/org/apache/cassandra/cql*/Cql.g  ...</echo>
       <java classname="org.antlr.Tool"
             classpath="${build.lib}/antlr-3.2.jar"
             fork="true"
@@ -330,8 +328,8 @@
           <dependency groupId="org.antlr" artifactId="antlr" version="3.2"/>
           <dependency groupId="org.slf4j" artifactId="slf4j-api" version="1.6.1"/>
           <dependency groupId="org.slf4j" artifactId="slf4j-log4j12" version="1.6.1"/>
-          <dependency groupId="org.codehaus.jackson" artifactId="jackson-core-asl" version="1.4.0"/>
-          <dependency groupId="org.codehaus.jackson" artifactId="jackson-mapper-asl" version="1.4.0"/>
+          <dependency groupId="org.codehaus.jackson" artifactId="jackson-core-asl" version="1.9.2"/>
+          <dependency groupId="org.codehaus.jackson" artifactId="jackson-mapper-asl" version="1.9.2"/>
           <dependency groupId="jline" artifactId="jline" version="0.9.94">
             <exclusion groupId="junit" artifactId="junit"/>
           </dependency>
@@ -684,12 +682,34 @@
         <antcall target="createVersionPropFile"/>
     </target>
 
+    <!-- Stress build file -->
+    <property name="stress.build.src" value="${basedir}/tools/stress/src" />
+    <property name="stress.build.classes" value="${build.classes}/stress" />
+	<property name="stress.manifest" value="${stress.build.classes}/MANIFEST.MF" />
+    <path id="cassandra.classes">
+        <pathelement location="${basedir}/build/classes/main" />
+        <pathelement location="${basedir}/build/classes/thrift" />
+    </path>
+    <target name="stress-build" depends="build">
+    	<mkdir dir="${stress.build.classes}" />
+        <javac destdir="${stress.build.classes}" includeantruntime="true">
+            <src path="${stress.build.src}" />
+            <classpath>
+                <path refid="cassandra.classes" />
+                <path>
+                    <fileset dir="${build.lib}">
+                        <include name="**/*.jar" />
+                    </fileset>
+                </path>
+            </classpath>
+        </javac>
+    </target>
 
     <!--
         The jar target makes cassandra.jar output.
     -->
     <target name="jar"
-            depends="maven-declare-dependencies,build, build-test"
+            depends="maven-declare-dependencies,build, build-test, stress-build"
             description="Assemble Cassandra JAR files">
       <mkdir dir="${build.classes.main}/META-INF" />
       <mkdir dir="${build.classes.thrift}/META-INF" />
@@ -750,6 +770,20 @@
           <attribute name="Implementation-Version" value="${version}"/>
           <attribute name="Implementation-Vendor" value="Apache"/>
         </manifest>
+      </jar>
+
+      <!-- Stress jar -->
+      <manifest file="${stress.manifest}">
+        <attribute name="Built-By" value="Pavel Yaskevich"/>
+        <attribute name="Main-Class" value="org.apache.cassandra.stress.Stress"/>
+      </manifest>
+      <mkdir dir="${stress.build.classes}/META-INF" />
+      <mkdir dir="${build.dir}/tools/lib/" />
+      <jar destfile="${build.dir}/tools/lib/stress.jar" manifest="${stress.manifest}">
+        <fileset dir="${stress.build.classes}"/>
+        <fileset dir="${basedir}/build/classes/main" />
+        <fileset dir="${basedir}/build/classes/thrift" />
+        <zipgroupfileset dir="${build.lib}" includes="*.jar" />
       </jar>
     </target>
 
@@ -862,7 +896,14 @@
           <include name="*.txt" />
         </fileset>
       </copy>
-
+      <copy todir="${dist.dir}/tools/bin">
+        <fileset dir="${basedir}/tools/bin"/>
+      </copy>
+      <copy todir="${dist.dir}/tools/lib">
+        <fileset dir="${build.dir}/tools/lib/">
+            <include name="*.jar" />
+        </fileset>
+      </copy>
       <artifact:writepom pomRefId="dist-pom" 
             file="${build.dir}/${final.name}-dist.pom"/>
       <tar compression="gzip" longfile="gnu"
@@ -880,6 +921,7 @@
         <!-- Executable scripts in bin/ -->
         <tarfileset dir="${dist.dir}" prefix="${final.name}" mode="755">
           <include name="bin/*"/>
+          <include name="tools/bin/*"/>
           <not>
                 <filename name="bin/*.in.sh" />
           </not>
@@ -1035,7 +1077,6 @@
         </fileset>
         <fileset dir="${build.lib}">
           <include name="**/guava*.jar" />
-          <include name="**/commons-lang*.jar" />
         </fileset>
       </classpath>
     </junit>
