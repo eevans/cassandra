@@ -120,6 +120,5 @@ public class Ec2MultiRegionSnitch extends Ec2Snitch implements IEndpointStateCha
     {
         super.gossiperStarting();
         Gossiper.instance.addLocalApplicationState(ApplicationState.INTERNAL_IP, StorageService.instance.valueFactory.internalIP(private_ip));
-        Gossiper.instance.register(this);
     }
 }

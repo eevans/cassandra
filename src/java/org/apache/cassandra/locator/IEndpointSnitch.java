@@ -21,6 +21,8 @@ package org.apache.cassandra.locator;
 import java.net.InetAddress;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * This interface helps determine location of node in the data center relative to another node.
@@ -39,6 +41,24 @@ public interface IEndpointSnitch
      * returns a String representing the datacenter this endpoint belongs to
      */
     public String getDatacenter(InetAddress endpoint);
+
+    public static interface Topology
+    {
+        /**
+         * returns map of datacenter to set of endpoints in that datacenter
+         */
+        public Map<String, Set<InetAddress>> getDatacenterEndpoints();
+    
+        /**
+         * returns map of datacenter to set of racks in that datacenter
+         */
+        public Map<String, Set<String>> getDatacenterRacks();
+    }
+
+    /**
+     * returns a snapshot of the current topology
+     */
+    public Topology getTopology();
 
     /**
      * returns a new <tt>List</tt> sorted by proximity to the given endpoint
