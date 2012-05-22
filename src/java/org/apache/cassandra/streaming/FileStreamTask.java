@@ -47,8 +47,7 @@ public class FileStreamTask extends WrappedRunnable
     private static Logger logger = LoggerFactory.getLogger(FileStreamTask.class);
 
     public static final int CHUNK_SIZE = 64 * 1024;
-    // around 10 minutes at the default rpctimeout
-    public static final int MAX_CONNECT_ATTEMPTS = 8;
+    public static final int MAX_CONNECT_ATTEMPTS = 4;
 
     protected final StreamHeader header;
     protected final InetAddress to;
@@ -105,6 +104,13 @@ public class FileStreamTask extends WrappedRunnable
                 receiveReply();
                 logger.info("Finished streaming session to {}", to);
             }
+        }
+        catch (IOException e)
+        {
+            StreamOutSession session = StreamOutSession.get(to, header.sessionId);
+            if (session != null)
+                session.close(false);
+            throw e;
         }
         finally
         {
@@ -263,7 +269,8 @@ public class FileStreamTask extends WrappedRunnable
 
     protected void close() throws IOException
     {
-        output.close();
+        if (output != null)
+            output.close();
     }
 
     public String toString()

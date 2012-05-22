@@ -31,6 +31,7 @@ import java.util.regex.Pattern;
 import javax.management.*;
 
 import com.google.common.collect.*;
+import com.google.common.util.concurrent.Futures;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -417,6 +418,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                                                    Integer.MIN_VALUE,
                                                    true);
             CacheService.instance.rowCache.put(new RowCacheKey(metadata.cfId, key), data);
+            cachedRowsRead++;
         }
 
         if (cachedRowsRead > 0)
@@ -609,8 +611,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             }
 
             assert getMemtableThreadSafe() == oldMemtable;
-            final ReplayPosition ctx = writeCommitLog ? CommitLog.instance.getContext() : ReplayPosition.NONE;
-            logger.debug("flush position is {}", ctx);
+            final Future<ReplayPosition> ctx = writeCommitLog ? CommitLog.instance.getContext() : Futures.immediateFuture(ReplayPosition.NONE);
 
             // submit the memtable for any indexed sub-cfses, and our own.
             final List<ColumnFamilyStore> icc = new ArrayList<ColumnFamilyStore>();
@@ -642,7 +643,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             // while keeping the wait-for-flush (future.get) out of anything latency-sensitive.
             return postFlushExecutor.submit(new WrappedRunnable()
             {
-                public void runMayThrow() throws InterruptedException, IOException
+                public void runMayThrow() throws InterruptedException, IOException, ExecutionException
                 {
                     latch.await();
 
@@ -662,7 +663,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                     {
                         // if we're not writing to the commit log, we are replaying the log, so marking
                         // the log header with "you can discard anything written before the context" is not valid
-                        CommitLog.instance.discardCompletedSegments(metadata.cfId, ctx);
+                        CommitLog.instance.discardCompletedSegments(metadata.cfId, ctx.get());
                     }
                 }
             });
@@ -880,21 +881,44 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public void addSSTable(SSTableReader sstable)
     {
         assert sstable.getColumnFamilyName().equals(columnFamily);
-        data.addSSTables(Arrays.asList(sstable));
+        addSSTables(Arrays.asList(sstable));
+    }
+
+    public void addSSTables(Collection<SSTableReader> sstables)
+    {
+        data.addSSTables(sstables);
         CompactionManager.instance.submitBackground(this);
     }
 
-    /*
-     * Add up all the files sizes this is the worst case file
+    /**
+     * Calculate expected file size of SSTable after compaction.
+     *
+     * If operation type is {@code CLEANUP}, then we calculate expected file size
+     * with checking token range to be eliminated.
+     * Other than that, we just add up all the files' size, which is the worst case file
      * size for compaction of all the list of files given.
+     *
+     * @param sstables SSTables to calculate expected compacted file size
+     * @param operation Operation type
+     * @return Expected file size of SSTable after compaction
      */
-    public long getExpectedCompactedFileSize(Iterable<SSTableReader> sstables)
+    public long getExpectedCompactedFileSize(Iterable<SSTableReader> sstables, OperationType operation)
     {
         long expectedFileSize = 0;
-        for (SSTableReader sstable : sstables)
+        if (operation == OperationType.CLEANUP)
         {
-            long size = sstable.onDiskLength();
-            expectedFileSize = expectedFileSize + size;
+            Collection<Range<Token>> ranges = StorageService.instance.getLocalRanges(table.name);
+            for (SSTableReader sstable : sstables)
+            {
+                List<Pair<Long, Long>> positions = sstable.getPositionsForRanges(ranges);
+                for (Pair<Long, Long> position : positions)
+                    expectedFileSize += position.right - position.left;
+            }
+        }
+        else
+        {
+            for (SSTableReader sstable : sstables)
+                expectedFileSize += sstable.onDiskLength();
         }
         return expectedFileSize;
     }
@@ -1357,12 +1381,12 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IFilter columnFilter, List<IndexExpression> rowFilter)
     {
-        return getRangeSlice(superColumn, range, maxResults, columnFilter, rowFilter, false);
+        return getRangeSlice(superColumn, range, maxResults, columnFilter, rowFilter, false, false);
     }
 
-    public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IFilter columnFilter, List<IndexExpression> rowFilter, boolean maxIsColumns)
+    public List<Row> getRangeSlice(ByteBuffer superColumn, final AbstractBounds<RowPosition> range, int maxResults, IFilter columnFilter, List<IndexExpression> rowFilter, boolean maxIsColumns, boolean isPaging)
     {
-        return filter(getSequentialIterator(superColumn, range, columnFilter), ExtendedFilter.create(this, columnFilter, rowFilter, maxResults, maxIsColumns));
+        return filter(getSequentialIterator(superColumn, range, columnFilter), ExtendedFilter.create(this, columnFilter, rowFilter, maxResults, maxIsColumns, isPaging));
     }
 
     public List<Row> search(List<IndexExpression> clause, AbstractBounds<RowPosition> range, int maxResults, IFilter dataFilter)
@@ -1408,8 +1432,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 rows.add(new Row(rawRow.key, data));
                 if (data != null)
                     columnsCount += data.getLiveColumnCount();
-                // Update the underlying filter to avoid querying more columns per slice than necessary
-                filter.updateColumnsLimit(columnsCount);
+                // Update the underlying filter to avoid querying more columns per slice than necessary and to handle paging
+                filter.updateFilter(columnsCount);
             }
             return rows;
         }
@@ -1450,8 +1474,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                                      " created in " + snapshotDirectory);
                 }
 
-                if (compactionStrategy instanceof LeveledCompactionStrategy)
-                    directories.snapshotLeveledManifest(snapshotName);
+                if (cfs.compactionStrategy instanceof LeveledCompactionStrategy)
+                    cfs.directories.snapshotLeveledManifest(snapshotName);
             }
             catch (IOException e)
             {
@@ -1674,29 +1698,63 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         // time.  So to guarantee that all segments can be cleaned out, we need to
         // "waitForActiveFlushes" after the new segment has been created.
         logger.debug("truncating {}", columnFamily);
-        // flush the CF being truncated before forcing the new segment
-        forceBlockingFlush();
-        CommitLog.instance.forceNewSegment();
-        ReplayPosition position = CommitLog.instance.getContext();
-        // now flush everyone else.  re-flushing ourselves is not necessary, but harmless
-        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
-            cfs.forceFlush();
-        waitForActiveFlushes();
-        // if everything was clean, flush won't have called discard
-        CommitLog.instance.discardCompletedSegments(metadata.cfId, position);
+
+        if (DatabaseDescriptor.isAutoSnapshot())
+        {
+            // flush the CF being truncated before forcing the new segment
+            forceBlockingFlush();
+        }
+        else
+        {
+            // just nuke the memtable data w/o writing to disk first
+            Table.switchLock.writeLock().lock();
+            try
+            {
+                for (ColumnFamilyStore cfs : concatWithIndexes())
+                {
+                    Memtable mt = cfs.getMemtableThreadSafe();
+                    if (!mt.isClean() && !mt.isFrozen())
+                    {
+                        mt.cfs.data.renewMemtable();
+                    }
+                }
+            }
+            finally
+            {
+                Table.switchLock.writeLock().unlock();
+            }
+        }
+
+        KSMetaData ksm = Schema.instance.getKSMetaData(this.table.name);
+        if (ksm.durableWrites)
+        {
+            CommitLog.instance.forceNewSegment();
+            Future<ReplayPosition> position = CommitLog.instance.getContext();
+            // now flush everyone else.  re-flushing ourselves is not necessary, but harmless
+            for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+                cfs.forceFlush();
+            waitForActiveFlushes();
+            // if everything was clean, flush won't have called discard
+            CommitLog.instance.discardCompletedSegments(metadata.cfId, position.get());
+        }
 
         // sleep a little to make sure that our truncatedAt comes after any sstable
         // that was part of the flushed we forced; otherwise on a tie, it won't get deleted.
         try
         {
-            Thread.sleep(100);
+            long starttime = System.currentTimeMillis();
+            while ((System.currentTimeMillis() - starttime) < 1)
+            {
+                Thread.sleep(1);
+            }
         }
         catch (InterruptedException e)
         {
             throw new AssertionError(e);
         }
         long truncatedAt = System.currentTimeMillis();
-        snapshot(Table.getTimestampedSnapshotName(columnFamily));
+        if (DatabaseDescriptor.isAutoSnapshot())
+            snapshot(Table.getTimestampedSnapshotName(columnFamily));
 
         return CompactionManager.instance.submitTruncate(this, truncatedAt);
     }
