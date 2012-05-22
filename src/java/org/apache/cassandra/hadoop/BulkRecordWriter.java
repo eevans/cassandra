@@ -30,6 +30,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -47,6 +48,8 @@ import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
 import org.apache.thrift.transport.TTransportException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 final class BulkRecordWriter extends RecordWriter<ByteBuffer,List<Mutation>>
@@ -55,11 +58,14 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
     private final static String OUTPUT_LOCATION = "mapreduce.output.bulkoutputformat.localdir";
     private final static String BUFFER_SIZE_IN_MB = "mapreduce.output.bulkoutputformat.buffersize";
     private final static String STREAM_THROTTLE_MBITS = "mapreduce.output.bulkoutputformat.streamthrottlembits";
+    private final static String MAX_FAILED_HOSTS = "mapreduce.output.bulkoutputformat.maxfailedhosts";
     private final Configuration conf;
+    private final Logger logger = LoggerFactory.getLogger(BulkRecordWriter.class);
     private SSTableSimpleUnsortedWriter writer;
     private SSTableLoader loader;
     private File outputdir;
     private Progressable progress;
+    private int maxFailures;
 
     private enum CFType
     {
@@ -95,6 +101,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
         Config.setOutboundBindAny(true);
         this.conf = conf;
         DatabaseDescriptor.setStreamThroughputOutboundMegabitsPerSec(Integer.valueOf(conf.get(STREAM_THROTTLE_MBITS, "0")));
+        maxFailures = Integer.valueOf(conf.get(MAX_FAILED_HOSTS, "0"));
         String keyspace = ConfigHelper.getOutputKeyspace(conf);
         outputdir = new File(getOutputLocation() + File.separator + keyspace + File.separator + ConfigHelper.getOutputColumnFamily(conf)); //dir must be named by ks/cf for the loader
         outputdir.mkdirs();
@@ -128,8 +135,13 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
         if (writer == null)
         {
             AbstractType<?> subcomparator = null;
+            ExternalClient externalClient = null;
+            String username = ConfigHelper.getOutputKeyspaceUserName(conf);
+            String password = ConfigHelper.getOutputKeyspacePassword(conf);
+
             if (cfType == CFType.SUPER)
                 subcomparator = BytesType.instance;
+            
             this.writer = new SSTableSimpleUnsortedWriter(
                     outputdir,
                     ConfigHelper.getOutputPartitioner(conf),
@@ -139,7 +151,13 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                     subcomparator,
                     Integer.valueOf(conf.get(BUFFER_SIZE_IN_MB, "64")),
                     ConfigHelper.getOutputCompressionParamaters(conf));
-            this.loader = new SSTableLoader(outputdir, new ExternalClient(ConfigHelper.getOutputInitialAddress(conf), ConfigHelper.getOutputRpcPort(conf)), new NullOutputHandler());
+
+            externalClient = new ExternalClient(ConfigHelper.getOutputInitialAddress(conf), 
+                                                ConfigHelper.getOutputRpcPort(conf),
+                                                username,
+                                                password);
+
+            this.loader = new SSTableLoader(outputdir, externalClient, new NullOutputHandler());
         }
     }
 
@@ -218,6 +236,13 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                     throw new IOException(e);
                 }
             }
+            if (future.hadFailures())
+            {
+                if (future.getFailedHosts().size() > maxFailures)
+                    throw new IOException("Too many hosts failed: " + future.getFailedHosts());
+                else
+                    logger.warn("Some hosts failed: " + future.getFailedHosts());
+            }
         }
     }
 
@@ -226,12 +251,16 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
         private final Map<String, Set<String>> knownCfs = new HashMap<String, Set<String>>();
         private String hostlist;
         private int rpcPort;
+        private final String username;
+        private final String password;
 
-        public ExternalClient(String hostlist, int port)
+        public ExternalClient(String hostlist, int port, String username, String password)
         {
             super();
             this.hostlist = hostlist;
             this.rpcPort = port;
+            this.username = username;
+            this.password = password;
         }
 
         public void init(String keyspace)
@@ -256,6 +285,18 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                 {
                     InetAddress host = hostiter.next();
                     Cassandra.Client client = createThriftClient(host.getHostAddress(), rpcPort);
+
+                    // log in
+                    client.set_keyspace(keyspace);
+                    if (username != null)
+                    {
+                        Map<String, String> creds = new HashMap<String, String>();
+                        creds.put(IAuthenticator.USERNAME_KEY, username);
+                        creds.put(IAuthenticator.PASSWORD_KEY, password);
+                        AuthenticationRequest authRequest = new AuthenticationRequest(creds);
+                        client.login(authRequest);
+                    }
+
                     List<TokenRange> tokenRanges = client.describe_ring(keyspace);
                     List<KsDef> ksDefs = client.describe_keyspaces();
 

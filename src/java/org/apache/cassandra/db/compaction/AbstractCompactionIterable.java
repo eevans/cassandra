@@ -28,12 +28,8 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.sstable.SSTableScanner;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.CloseableIterator;
-import org.apache.cassandra.utils.Throttle;
 
 public abstract class AbstractCompactionIterable extends CompactionInfo.Holder implements Iterable<AbstractCompactedRow>
 {
@@ -43,11 +39,9 @@ public abstract class AbstractCompactionIterable extends CompactionInfo.Holder i
     protected final CompactionController controller;
     protected final long totalBytes;
     protected volatile long bytesRead;
-    protected final List<SSTableScanner> scanners;
+    protected final List<ICompactionScanner> scanners;
 
-    protected final Throttle throttle;
-
-    public AbstractCompactionIterable(CompactionController controller, OperationType type, List<SSTableScanner> scanners)
+    public AbstractCompactionIterable(CompactionController controller, OperationType type, List<ICompactionScanner> scanners)
     {
         this.controller = controller;
         this.type = type;
@@ -55,32 +49,9 @@ public abstract class AbstractCompactionIterable extends CompactionInfo.Holder i
         this.bytesRead = 0;
 
         long bytes = 0;
-        for (SSTableScanner scanner : scanners)
-            bytes += scanner.getFileLength();
+        for (ICompactionScanner scanner : scanners)
+            bytes += scanner.getLengthInBytes();
         this.totalBytes = bytes;
-
-        this.throttle = new Throttle(toString(), new Throttle.ThroughputFunction()
-        {
-            /** @return Instantaneous throughput target in bytes per millisecond. */
-            public int targetThroughput()
-            {
-                if (DatabaseDescriptor.getCompactionThroughputMbPerSec() < 1 || StorageService.instance.isBootstrapMode())
-                    // throttling disabled
-                    return 0;
-                // total throughput
-                int totalBytesPerMS = DatabaseDescriptor.getCompactionThroughputMbPerSec() * 1024 * 1024 / 1000;
-                // per stream throughput (target bytes per MS)
-                return totalBytesPerMS / Math.max(1, CompactionManager.instance.getActiveCompactions());
-            }
-        });
-    }
-
-    protected static List<SSTableScanner> getScanners(Iterable<SSTableReader> sstables) throws IOException
-    {
-        ArrayList<SSTableScanner> scanners = new ArrayList<SSTableScanner>();
-        for (SSTableReader sstable : sstables)
-            scanners.add(sstable.getDirectScanner());
-        return scanners;
     }
 
     public CompactionInfo getCompactionInfo()
