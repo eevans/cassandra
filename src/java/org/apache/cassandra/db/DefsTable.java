@@ -152,7 +152,7 @@ public class DefsTable
 
         for (Row row : serializedSchema)
         {
-            if (row.cf == null || row.cf.isEmpty() || row.cf.isMarkedForDelete())
+            if (row.cf == null || (row.cf.isMarkedForDelete() && row.cf.isEmpty()))
                 continue;
 
             keyspaces.add(KSMetaData.fromSchema(row, serializedColumnFamilies(row.key)));
@@ -483,7 +483,8 @@ public class DefsTable
 
             if (!StorageService.instance.isClientMode())
             {
-                cfs.snapshot(snapshotName);
+                if (DatabaseDescriptor.isAutoSnapshot())
+                    cfs.snapshot(snapshotName);
                 Table.open(ksm.name).dropCf(cfm.cfId);
             }
         }
@@ -508,7 +509,8 @@ public class DefsTable
 
         if (!StorageService.instance.isClientMode())
         {
-            cfs.snapshot(Table.getTimestampedSnapshotName(cfs.columnFamily));
+            if (DatabaseDescriptor.isAutoSnapshot())
+                cfs.snapshot(Table.getTimestampedSnapshotName(cfs.columnFamily));
             Table.open(ksm.name).dropCf(cfm.cfId);
         }
     }
