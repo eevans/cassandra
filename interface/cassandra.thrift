@@ -55,7 +55,7 @@ namespace rb CassandraThrift
 # An effort should be made not to break forward-client-compatibility either
 # (e.g. one should avoid removing obsolete fields from the IDL), but no
 # guarantees in this respect are made by the Cassandra project.
-const string VERSION = "19.30.0"
+const string VERSION = "19.32.0"
 
 
 #
@@ -423,8 +423,6 @@ struct CfDef {
     32: optional map<string,string> compression_options,
     33: optional double bloom_filter_fp_chance,
     34: optional string caching="keys_only",
-    35: optional list<binary> column_aliases,
-    36: optional binary value_alias,
     37: optional double dclocal_read_repair_chance = 0.0,
 
     /* All of the following are now ignored and unsupplied. */
@@ -499,7 +497,8 @@ struct CqlResult {
 struct CqlPreparedResult {
     1: required i32 itemId,
     2: required i32 count,
-    3: optional list<string> variable_types
+    3: optional list<string> variable_types,
+    4: optional list<string> variable_names
 }
 
 
@@ -683,6 +682,12 @@ service Cassandra {
   list<TokenRange> describe_ring(1:required string keyspace)
                    throws (1:InvalidRequestException ire),
 
+  /** get the mapping between token->node ip
+      without taking replication into consideration
+      https://issues.apache.org/jira/browse/CASSANDRA-4092 */
+  map<string, string> describe_token_map()
+                    throws (1:InvalidRequestException ire),
+  
   /** returns the partitioner used by this cluster */
   string describe_partitioner(),
 

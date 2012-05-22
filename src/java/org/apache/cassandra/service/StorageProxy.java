@@ -852,7 +852,8 @@ public class StorageProxy implements StorageProxyMBean
                                                                   range,
                                                                   command.row_filter,
                                                                   command.maxResults,
-                                                                  command.maxIsColumns);
+                                                                  command.maxIsColumns,
+                                                                  command.isPaging);
 
                 List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(nodeCmd.keyspace, range.right);
                 DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), liveEndpoints);
