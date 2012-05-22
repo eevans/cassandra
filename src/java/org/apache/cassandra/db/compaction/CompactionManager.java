@@ -40,6 +40,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.CompactionInfo.Holder;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexBuilder;
+import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.*;
@@ -468,6 +469,7 @@ public class CompactionManager implements CompactionManagerMBean
         // row header (key or data size) is corrupt. (This means our position in the index file will be one row
         // "ahead" of the data file.)
         final RandomAccessReader dataFile = sstable.openDataReader(true);
+        long rowsRead = 0;
         RandomAccessReader indexFile = RandomAccessReader.open(new File(sstable.descriptor.filenameFor(Component.PRIMARY_INDEX)), true);
         ScrubInfo scrubInfo = new ScrubInfo(dataFile, sstable);
         executor.beginCompaction(scrubInfo);
@@ -606,6 +608,8 @@ public class CompactionManager implements CompactionManagerMBean
                         badRows++;
                     }
                 }
+                if ((rowsRead++ % 1000) == 0)
+                    controller.mayThrottle(dataFile.getFilePointer());
             }
 
             if (writer.getFilePointer() > 0)
@@ -668,6 +672,12 @@ public class CompactionManager implements CompactionManagerMBean
 
         for (SSTableReader sstable : sstables)
         {
+            if (!new Bounds<Token>(sstable.first.token, sstable.last.token).intersects(ranges))
+            {
+                cfs.replaceCompactedSSTables(Arrays.asList(sstable), Collections.<SSTableReader>emptyList(), OperationType.CLEANUP);
+                continue;
+            }
+
             CompactionController controller = new CompactionController(cfs, Collections.singletonList(sstable), getDefaultGcBefore(cfs), false);
             long startTime = System.currentTimeMillis();
 
@@ -683,12 +693,13 @@ public class CompactionManager implements CompactionManagerMBean
 
             logger.info("Cleaning up " + sstable);
             // Calculate the expected compacted filesize
-            long expectedRangeFileSize = cfs.getExpectedCompactedFileSize(Arrays.asList(sstable)) / 2;
+            long expectedRangeFileSize = cfs.getExpectedCompactedFileSize(Arrays.asList(sstable), OperationType.CLEANUP);
             File compactionFileLocation = cfs.directories.getDirectoryForNewSSTables(expectedRangeFileSize);
             if (compactionFileLocation == null)
                 throw new IOException("disk full");
 
             SSTableScanner scanner = sstable.getDirectScanner();
+            long rowsRead = 0;
             Collection<ByteBuffer> indexedColumns = cfs.indexManager.getIndexedColumns();
             List<IColumn> indexedColumnsInRow = null;
 
@@ -748,6 +759,8 @@ public class CompactionManager implements CompactionManagerMBean
                             }
                         }
                     }
+                    if ((rowsRead++ % 1000) == 0)
+                        controller.mayThrottle(scanner.getCurrentPosition());
                 }
                 if (writer != null)
                     newSstable = writer.closeAndOpenReader(sstable.maxDataAge);
@@ -973,16 +986,8 @@ public class CompactionManager implements CompactionManagerMBean
         public ValidationCompactionIterable(ColumnFamilyStore cfs, Collection<SSTableReader> sstables, Range<Token> range) throws IOException
         {
             super(OperationType.VALIDATION,
-                  getScanners(sstables, range),
+                  cfs.getCompactionStrategy().getScanners(sstables, range),
                   new CompactionController(cfs, sstables, getDefaultGcBefore(cfs), true));
-        }
-
-        protected static List<SSTableScanner> getScanners(Iterable<SSTableReader> sstables, Range<Token> range) throws IOException
-        {
-            ArrayList<SSTableScanner> scanners = new ArrayList<SSTableScanner>();
-            for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getDirectScanner(range));
-            return scanners;
         }
     }
 
@@ -1183,8 +1188,8 @@ public class CompactionManager implements CompactionManagerMBean
                                           sstable.descriptor.ksname,
                                           sstable.descriptor.cfname,
                                           OperationType.CLEANUP,
-                                          scanner.getFilePointer(),
-                                          scanner.getFileLength());
+                                          scanner.getCurrentPosition(),
+                                          scanner.getLengthInBytes());
             }
             catch (Exception e)
             {

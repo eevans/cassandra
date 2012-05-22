@@ -17,35 +17,30 @@
 # limitations under the License.
 
 if [ "x$CLASSPATH" = "x" ]; then
-    # Cassandra class files.
-    if [ ! -d `dirname $0`/../../../build/classes/main ]; then
-        echo "Unable to locate cassandra class files" >&2
-        exit 1
+    
+    # execute from the build dir.
+    if [ -d `dirname $0`/../../build/classes ]; then
+        for directory in `dirname $0`/../../build/classes/*; do
+            CLASSPATH=$CLASSPATH:$directory
+        done
+    else
+        if [ -f `dirname $0`/../lib/stress.jar ]; then
+            CLASSPATH=`dirname $0`/../lib/stress.jar
+        fi
     fi
 
-    # Stress class files.
-    if [ ! -d `dirname $0`/../build/classes ]; then
-        echo "Unable to locate stress class files" >&2
-        exit 1
-    fi
-
-    CLASSPATH=`dirname $0`/../../../build/classes/main
-    CLASSPATH=$CLASSPATH:`dirname $0`/../../../build/classes/thrift
-    CLASSPATH=$CLASSPATH:`dirname $0`/../build/classes
-    for jar in `dirname $0`/../../../lib/*.jar; do
+    for jar in `dirname $0`/../../lib/*.jar; do
         CLASSPATH=$CLASSPATH:$jar
     done
 fi
 
+# Use JAVA_HOME if set, otherwise look for java in PATH
 if [ -x $JAVA_HOME/bin/java ]; then
     JAVA=$JAVA_HOME/bin/java
 else
     JAVA=`which java`
 fi
 
-if [ "x$JAVA" = "x" ]; then
-    echo "Java executable not found (hint: set JAVA_HOME)" >&2
-    exit 1
-fi
-
-$JAVA -server -cp $CLASSPATH org.apache.cassandra.stress.Stress $@
+$JAVA -cp $CLASSPATH \
+        -Dlog4j.configuration=log4j-tools.properties \
+        org.apache.cassandra.tools.SSTableMetadataViewer "$@"

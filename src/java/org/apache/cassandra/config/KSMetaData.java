@@ -87,7 +87,7 @@ public final class KSMetaData
                                                 CFMetaData.SchemaColumnFamiliesCf,
                                                 CFMetaData.SchemaColumnsCf,
                                                 CFMetaData.HostIdCf);
-        return new KSMetaData(Table.SYSTEM_TABLE, LocalStrategy.class, optsWithRF(1), true, cfDefs);
+        return new KSMetaData(Table.SYSTEM_TABLE, LocalStrategy.class, Collections.<String, String>emptyMap(), true, cfDefs);
     }
 
     public static KSMetaData testMetadata(String name, Class<? extends AbstractReplicationStrategy> strategyClass, Map<String, String> strategyOptions, CFMetaData... cfDefs)
@@ -182,7 +182,7 @@ public final class KSMetaData
     public KSMetaData validate() throws ConfigurationException
     {
         if (!CFMetaData.isNameValid(name))
-            throw new ConfigurationException(String.format("Invalid keyspace name: shouldn't be empty nor more than 32 character long (got \"%s\")", name));
+            throw new ConfigurationException(String.format("Invalid keyspace name: shouldn't be empty nor more than %s characters long (got \"%s\")", Schema.NAME_LENGTH, name));
 
         // Attempt to instantiate the ARS, which will throw a ConfigException if the strategy_options aren't fully formed
         TokenMetadata tmd = StorageService.instance.getTokenMetadata();
@@ -296,7 +296,7 @@ public final class KSMetaData
         for (CFMetaData cfm : cfms.values())
         {
             Row columnRow = ColumnDefinition.readSchema(cfm.ksName, cfm.cfName);
-            for (ColumnDefinition cd : ColumnDefinition.fromSchema(columnRow, cfm.getColumnDefinitionComparator()))
+            for (ColumnDefinition cd : ColumnDefinition.fromSchema(columnRow, cfm))
                 cfm.column_metadata.put(cd.name, cd);
         }
 
