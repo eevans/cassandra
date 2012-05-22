@@ -20,6 +20,10 @@ package org.apache.cassandra.gms;
 
 import java.io.*;
 import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
 import org.apache.cassandra.dht.IPartitioner;
@@ -105,18 +109,38 @@ public class VersionedValue implements Comparable<VersionedValue>
             this.partitioner = partitioner;
         }
 
+        @Deprecated
         public VersionedValue bootstrapping(Token token, UUID hostId)
+        {
+            return bootstrapping(Collections.singleton(token), hostId);
+        }
+
+        public VersionedValue bootstrapping(Collection<Token> tokens, UUID hostId)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_BOOTSTRAPPING,
                                                     hostId.toString(),
-                                                    partitioner.getTokenFactory().toString(token)));
+                                                    makeTokenString(tokens)));
         }
 
+        @Deprecated
         public VersionedValue normal(Token token, UUID hostId)
+        {
+            return normal(Collections.singleton(token), hostId);
+        }
+
+        public VersionedValue normal(Collection<Token> tokens, UUID hostId)
         {
             return new VersionedValue(versionString(VersionedValue.STATUS_NORMAL,
                                                     hostId.toString(),
-                                                    partitioner.getTokenFactory().toString(token)));
+                                                    makeTokenString(tokens)));
+        }
+
+        private String makeTokenString(Collection<Token> tokens)
+        {
+            List<String> tokenStrings = new ArrayList<String>();
+            for (Token<?> token : tokens)
+                tokenStrings.add(partitioner.getTokenFactory().toString(token));
+            return StringUtils.join(tokenStrings, VersionedValue.DELIMITER);
         }
 
         public VersionedValue load(double load)
@@ -129,15 +153,29 @@ public class VersionedValue implements Comparable<VersionedValue>
             return new VersionedValue(newVersion.toString());
         }
 
+        @Deprecated
         public VersionedValue leaving(Token token)
         {
-            return new VersionedValue(VersionedValue.STATUS_LEAVING + VersionedValue.DELIMITER + partitioner.getTokenFactory().toString(token));
+            return leaving(Collections.singleton(token));
         }
 
+        public VersionedValue leaving(Collection<Token> tokens)
+        {
+            return new VersionedValue(versionString(VersionedValue.STATUS_LEAVING,
+                                                    makeTokenString(tokens)));
+        }
+
+        @Deprecated
         public VersionedValue left(Token token, long expireTime)
         {
-            return new VersionedValue(VersionedValue.STATUS_LEFT + VersionedValue.DELIMITER
-                    + partitioner.getTokenFactory().toString(token) + VersionedValue.DELIMITER + expireTime);
+            return left(Collections.singleton(token), expireTime);
+        }
+
+        public VersionedValue left(Collection<Token> tokens, long expireTime)
+        {
+            return new VersionedValue(versionString(VersionedValue.STATUS_LEFT,
+                                                    Long.toString(expireTime),
+                                                    makeTokenString(tokens)));
         }
 
         public VersionedValue moving(Token token)
@@ -206,6 +244,12 @@ public class VersionedValue implements Comparable<VersionedValue>
                 {
                     assert pieces.length >= 3;
                     outValue = versionString(pieces[0], pieces[2]);
+                }
+
+                if (type.equals(STATUS_LEFT))
+                {
+                    assert pieces.length >= 3;
+                    outValue = versionString(pieces[0], pieces[2], pieces[1]);
                 }
 
                 if ((type.equals(REMOVAL_COORDINATOR)) || (type.equals(REMOVING_TOKEN)) || (type.equals(REMOVED_TOKEN)))

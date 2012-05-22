@@ -1,6 +1,6 @@
 From: Sam Overton <sam@acunu.com>
-Subject: [PATCH] p/cassandra-1.1/4121/01_support_multiple_tokens_per_host
+Subject: [PATCH] p/cassandra-1.1/4122/01_bootstrap_decommission
 
-1.1 backport of p/4121/01_support_multiple_tokens_per_host
+1.1 backport of p/4122/01_bootstrap_decommission
 
 Signed-off-by: Sam Overton <sam@acunu.com>

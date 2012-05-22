@@ -415,7 +415,8 @@ public class DatabaseDescriptor
             }
 
             if (conf.initial_token != null)
-                partitioner.getTokenFactory().validate(conf.initial_token);
+                for (String token : tokensFromString(conf.initial_token))
+                    partitioner.getTokenFactory().validate(token);
 
             try
             {
@@ -660,14 +661,40 @@ public class DatabaseDescriptor
     	return conf.column_index_size_in_kb * 1024;
     }
 
+    @Deprecated
     public static String getInitialToken()
     {
         return System.getProperty("cassandra.initial_token", conf.initial_token);
     }
 
+    public static Collection<String> getInitialTokens()
+    {
+        return tokensFromString(System.getProperty("cassandra.initial_token", conf.initial_token));
+    }
+
+    public static Collection<String> tokensFromString(String tokenString)
+    {
+        List<String> tokens = new ArrayList<String>();
+        if (tokenString != null)
+            for (String token : tokenString.split(","))
+                tokens.add(token.replaceAll("^\\s+", "").replaceAll("\\s+$", ""));
+        return tokens;
+    }
+
+    public static Integer getNumTokens()
+    {
+        return conf.num_tokens;
+    }
+
+    @Deprecated
     public static String getReplaceToken()
     {
         return System.getProperty("cassandra.replace_token", null);
+    }
+
+    public static Collection<String> getReplaceTokens()
+    {
+        return tokensFromString(System.getProperty("cassandra.replace_token", null));
     }
 
     public static String getClusterName()

@@ -293,14 +293,15 @@ public class TokenMetadata
         }
     }
 
-    public void removeBootstrapToken(Token token)
+    public void removeBootstrapTokens(Collection<Token> tokens)
     {
-        assert token != null;
+        assert tokens != null && !tokens.isEmpty();
 
         lock.writeLock().lock();
         try
         {
-            bootstrapTokens.remove(token);
+            for (Token token : tokens)
+                bootstrapTokens.remove(token);
         }
         finally
         {

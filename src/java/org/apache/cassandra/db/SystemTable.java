@@ -47,6 +47,8 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.NodeId;
 import org.apache.cassandra.utils.UUIDGen;
 
+import static org.apache.cassandra.utils.ByteBufferUtil.EMPTY_BYTE_BUFFER;;
+
 public class SystemTable
 {
     private static Logger logger = LoggerFactory.getLogger(SystemTable.class);
@@ -64,6 +66,7 @@ public class SystemTable
     private static final ByteBuffer RING_KEY = ByteBufferUtil.bytes("Ring");
     private static final ByteBuffer BOOTSTRAP_KEY = ByteBufferUtil.bytes("Bootstrap");
     private static final ByteBuffer COOKIE_KEY = ByteBufferUtil.bytes("Cookies");
+    private static final ByteBuffer TOKENS_KEY = ByteBufferUtil.bytes("Tokens");
     private static final ByteBuffer BOOTSTRAP = ByteBufferUtil.bytes("B");
     private static final ByteBuffer TOKEN = ByteBufferUtil.bytes("Token");
     private static final ByteBuffer GENERATION = ByteBufferUtil.bytes("Generation");
@@ -81,6 +84,7 @@ public class SystemTable
     {
         setupVersion();
         purgeIncompatibleHints();
+        upgradeTokenStorage();
     }
 
     private static void setupVersion() throws IOException
@@ -140,19 +144,86 @@ public class SystemTable
         rm.apply();
     }
 
+    /** When upgrading from pre-1.2, perform a one-time copy of the token to the new tokens row. */
+    private static void upgradeTokenStorage()
+    {
+        // Query STATUS_CF/LOCATION_KEY/TOKEN, the pre-1.2 location for a persisted token
+        ByteBuffer tokenBytes = null;
+        Table table = Table.open(Table.SYSTEM_TABLE);
+        QueryFilter filter = QueryFilter.getNamesFilter(decorate(LOCATION_KEY), new QueryPath(STATUS_CF), TOKEN);
+        ColumnFamily cf = table.getColumnFamilyStore(STATUS_CF).getColumnFamily(filter);
+
+        // If a result exists, this node is an upgrade from something earlier than 1.2, so we go on.
+        if (cf != null) tokenBytes = cf.getColumn(TOKEN).value();
+        else return;
+
+        // Look for an upgrade marker to indicate that the copy has already been performed.
+        ByteBuffer upgradeMarker = ByteBufferUtil.bytes("Pre-1.2 token copied");
+        filter = QueryFilter.getNamesFilter(decorate(COOKIE_KEY), new QueryPath(STATUS_CF), upgradeMarker);
+        cf = table.getColumnFamilyStore(STATUS_CF).getColumnFamily(filter);
+        if (cf != null)
+        {
+            logger.debug("Pre-1.2 token has already been copied");
+            return;
+        }
+
+        RowMutation rm;
+
+        // The marker wasn't found (This Is The Upgrade), so copy the token from the old location, to the new.
+        cf = ColumnFamily.create(Table.SYSTEM_TABLE, STATUS_CF);
+        cf.addColumn(new Column(tokenBytes, EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros()));
+        rm = new RowMutation(Table.SYSTEM_TABLE, TOKENS_KEY);
+        rm.add(cf);
+        try
+        {
+            rm.apply();
+        }
+        catch (IOException e)
+        {
+            throw new IOError(e);
+        }
+
+        // Set the upgrade marker so that we know better next time.
+        cf = ColumnFamily.create(Table.SYSTEM_TABLE, STATUS_CF);
+        cf.addColumn(new Column(upgradeMarker, ByteBufferUtil.bytes("yes, they were copied"), FBUtilities.timestampMicros()));
+        rm = new RowMutation(Table.SYSTEM_TABLE, COOKIE_KEY);
+        rm.add(cf);
+        try
+        {
+            rm.apply();
+        }
+        catch (IOException e)
+        {
+            throw new IOError(e);
+        }
+
+        logger.debug("Copied over token from legacy location.");
+
+        forceBlockingFlush(STATUS_CF);
+    }
+
     /**
      * Record token being used by another node
      */
+    @Deprecated
     public static synchronized void updateToken(InetAddress ep, Token token)
+    {
+        updateTokens(ep, Arrays.asList(token));
+    }
+
+    public static synchronized void updateTokens(InetAddress ep, Collection<Token> tokens)
     {
         if (ep.equals(FBUtilities.getBroadcastAddress()))
         {
-            removeToken(token);
+            removeTokens(tokens);
             return;
         }
         IPartitioner p = StorageService.getPartitioner();
         ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_TABLE, STATUS_CF);
-        cf.addColumn(new Column(p.getTokenFactory().toByteArray(token), ByteBuffer.wrap(ep.getAddress()), FBUtilities.timestampMicros()));
+        long timestampMicros = FBUtilities.timestampMicros();
+        for (Token token : tokens)
+            cf.addColumn(new Column(p.getTokenFactory().toByteArray(token), ByteBuffer.wrap(ep.getAddress()), timestampMicros));
+
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, RING_KEY);
         rm.add(cf);
         try
@@ -169,11 +240,19 @@ public class SystemTable
     /**
      * Remove stored token being used by another node
      */
+    @Deprecated
     public static synchronized void removeToken(Token token)
+    {
+        removeTokens(Arrays.asList(token));
+    }
+
+    public static synchronized void removeTokens(Collection<Token> tokens)
     {
         IPartitioner p = StorageService.getPartitioner();
         RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, RING_KEY);
-        rm.delete(new QueryPath(STATUS_CF, null, p.getTokenFactory().toByteArray(token)), FBUtilities.timestampMicros());
+        long timestampMicros = FBUtilities.timestampMicros();
+        for (Token token : tokens)
+            rm.delete(new QueryPath(STATUS_CF, null, p.getTokenFactory().toByteArray(token)), timestampMicros);
         try
         {
             rm.apply();
@@ -188,12 +267,24 @@ public class SystemTable
     /**
      * This method is used to update the System Table with the new token for this node
     */
+    @Deprecated
     public static synchronized void updateToken(Token token)
+    {
+        updateTokens(Arrays.asList(token));
+    }
+
+    /**
+     * This method is used to update the System Table with the new tokens for this node
+    */
+    public static synchronized void updateTokens(Collection<Token> tokens)
     {
         IPartitioner p = StorageService.getPartitioner();
         ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_TABLE, STATUS_CF);
-        cf.addColumn(new Column(SystemTable.TOKEN, p.getTokenFactory().toByteArray(token), FBUtilities.timestampMicros()));
-        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, LOCATION_KEY);
+
+        for (Token<?> token : tokens)
+            cf.addColumn(new Column(p.getTokenFactory().toByteArray(token), EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros()));
+
+        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, TOKENS_KEY);
         rm.add(cf);
         try
         {
@@ -306,12 +397,24 @@ public class SystemTable
             throw new ConfigurationException("Saved cluster name " + savedClusterName + " != configured name " + DatabaseDescriptor.getClusterName());
     }
 
+    @Deprecated
     public static Token getSavedToken()
     {
+        return getSavedTokens().iterator().next();
+    }
+
+    public static Collection<Token> getSavedTokens()
+    {
         Table table = Table.open(Table.SYSTEM_TABLE);
-        QueryFilter filter = QueryFilter.getNamesFilter(decorate(LOCATION_KEY), new QueryPath(STATUS_CF), TOKEN);
-        ColumnFamily cf = table.getColumnFamilyStore(STATUS_CF).getColumnFamily(filter);
-        return cf == null ? null : StorageService.getPartitioner().getTokenFactory().fromByteArray(cf.getColumn(TOKEN).value());
+        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(TOKENS_KEY), new QueryPath(STATUS_CF));
+        ColumnFamily cf = ColumnFamilyStore.removeDeleted(table.getColumnFamilyStore(STATUS_CF).getColumnFamily(filter), Integer.MAX_VALUE);
+        List<Token> tokens = new ArrayList<Token>();
+
+        if (cf != null)
+            for (IColumn column : cf.getSortedColumns())
+                tokens.add(StorageService.getPartitioner().getTokenFactory().fromByteArray(column.name()));
+
+        return tokens;
     }
 
     public static int incrementAndGetGeneration() throws IOException
