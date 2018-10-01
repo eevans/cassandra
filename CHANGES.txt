@@ -1,4 +1,5 @@
 3.11.4
+ * Permit use of DELETE statements with CQLSSTableWriter (CASSANDRA-14797)
 Merged from 3.0:
  * Avoid calling iter.next() in a loop when notifying indexers about range tombstones (CASSANDRA-14794)
  * Fix purging semi-expired RT boundaries in reversed iterators (CASSANDRA-14672)

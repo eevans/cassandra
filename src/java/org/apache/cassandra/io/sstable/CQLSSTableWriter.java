@@ -44,9 +44,10 @@ import org.apache.cassandra.cql3.statements.CreateTableStatement;
 import org.apache.cassandra.cql3.statements.CreateTypeStatement;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.cql3.statements.ParsedStatement;
-import org.apache.cassandra.cql3.statements.UpdateStatement;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.db.partitions.Partition;
@@ -117,11 +118,11 @@ public class CQLSSTableWriter implements Closeable
     }
 
     private final AbstractSSTableSimpleWriter writer;
-    private final UpdateStatement insert;
+    private final ModificationStatement insert;
     private final List<ColumnSpecification> boundNames;
     private final List<TypeCodec> typeCodecs;
 
-    private CQLSSTableWriter(AbstractSSTableSimpleWriter writer, UpdateStatement insert, List<ColumnSpecification> boundNames)
+    private CQLSSTableWriter(AbstractSSTableSimpleWriter writer, ModificationStatement insert, List<ColumnSpecification> boundNames)
     {
         this.writer = writer;
         this.insert = insert;
@@ -249,7 +250,6 @@ public class CQLSSTableWriter implements Closeable
 
         QueryOptions options = QueryOptions.forInternalCalls(null, values);
         List<ByteBuffer> keys = insert.buildPartitionKeyNames(options);
-        SortedSet<Clustering> clusterings = insert.createClustering(options);
 
         long now = System.currentTimeMillis() * 1000;
         // Note that we asks indexes to not validate values (the last 'false' arg below) because that triggers a 'Keyspace.open'
@@ -263,12 +263,26 @@ public class CQLSSTableWriter implements Closeable
 
         try
         {
-            for (ByteBuffer key : keys)
+            if (insert.hasSlices())
             {
-                for (Clustering clustering : clusterings)
-                    insert.addUpdateForKey(writer.getUpdateFor(key), clustering, params);
+                Slices slices = insert.createSlices(options);
+
+                for (ByteBuffer key : keys)
+                {
+                    for (Slice slice : slices)
+                        insert.addUpdateForKey(writer.getUpdateFor(key), slice, params);
+                }
             }
-            return this;
+            else
+            {
+                SortedSet<Clustering> clusterings = insert.createClustering(options);
+
+                for (ByteBuffer key : keys)
+                {
+                    for (Clustering clustering : clusterings)
+                        insert.addUpdateForKey(writer.getUpdateFor(key), clustering, params);
+                }
+            }
         }
         catch (SSTableSimpleUnsortedWriter.SyncException e)
         {
@@ -276,6 +290,8 @@ public class CQLSSTableWriter implements Closeable
             // wrapped in a SyncException (see BufferedWriter below). We want to extract that IOE.
             throw (IOException)e.getCause();
         }
+
+        return this;
     }
 
     /**
@@ -542,7 +558,7 @@ public class CQLSSTableWriter implements Closeable
                     Schema.instance.setKeyspaceMetadata(ksm.withSwapped(ksm.tables.with(cfMetaData)).withSwapped(types));
                 }
 
-                Pair<UpdateStatement, List<ColumnSpecification>> preparedInsert = prepareInsert();
+                Pair<ModificationStatement, List<ColumnSpecification>> preparedInsert = prepareInsert();
 
                 AbstractSSTableSimpleWriter writer = sorted
                                                      ? new SSTableSimpleWriter(directory, cfMetaData, preparedInsert.left.updatedColumns())
@@ -586,10 +602,10 @@ public class CQLSSTableWriter implements Closeable
          *
          * @return prepared Insert statement and it's bound names
          */
-        private Pair<UpdateStatement, List<ColumnSpecification>> prepareInsert()
+        private Pair<ModificationStatement, List<ColumnSpecification>> prepareInsert()
         {
             ParsedStatement.Prepared cqlStatement = insertStatement.prepare(ClientState.forInternalCalls());
-            UpdateStatement insert = (UpdateStatement) cqlStatement.statement;
+            ModificationStatement insert = (ModificationStatement) cqlStatement.statement;
             insert.validate(ClientState.forInternalCalls());
 
             if (insert.hasConditions())
