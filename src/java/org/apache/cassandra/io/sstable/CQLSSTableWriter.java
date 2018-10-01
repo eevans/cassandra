@@ -42,8 +42,9 @@ import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UpdateParameters;
 import org.apache.cassandra.cql3.functions.UDHelper;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
-import org.apache.cassandra.cql3.statements.UpdateStatement;
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.dht.IPartitioner;
@@ -115,11 +116,11 @@ public class CQLSSTableWriter implements Closeable
     }
 
     private final AbstractSSTableSimpleWriter writer;
-    private final UpdateStatement insert;
+    private final ModificationStatement insert;
     private final List<ColumnSpecification> boundNames;
     private final List<TypeCodec> typeCodecs;
 
-    private CQLSSTableWriter(AbstractSSTableSimpleWriter writer, UpdateStatement insert, List<ColumnSpecification> boundNames)
+    private CQLSSTableWriter(AbstractSSTableSimpleWriter writer, ModificationStatement insert, List<ColumnSpecification> boundNames)
     {
         this.writer = writer;
         this.insert = insert;
@@ -247,7 +248,6 @@ public class CQLSSTableWriter implements Closeable
 
         QueryOptions options = QueryOptions.forInternalCalls(null, values);
         List<ByteBuffer> keys = insert.buildPartitionKeyNames(options);
-        SortedSet<Clustering> clusterings = insert.createClustering(options);
 
         long now = System.currentTimeMillis();
         // Note that we asks indexes to not validate values (the last 'false' arg below) because that triggers a 'Keyspace.open'
@@ -262,12 +262,26 @@ public class CQLSSTableWriter implements Closeable
 
         try
         {
-            for (ByteBuffer key : keys)
+            if (insert.hasSlices())
             {
-                for (Clustering clustering : clusterings)
-                    insert.addUpdateForKey(writer.getUpdateFor(key), clustering, params);
+                Slices slices = insert.createSlices(options);
+
+                for (ByteBuffer key : keys)
+                {
+                    for (Slice slice : slices)
+                        insert.addUpdateForKey(writer.getUpdateFor(key), slice, params);
+                }
             }
-            return this;
+            else
+            {
+                SortedSet<Clustering> clusterings = insert.createClustering(options);
+
+                for (ByteBuffer key : keys)
+                {
+                    for (Clustering clustering : clusterings)
+                        insert.addUpdateForKey(writer.getUpdateFor(key), clustering, params);
+                }
+            }
         }
         catch (SSTableSimpleUnsortedWriter.SyncException e)
         {
@@ -275,6 +289,8 @@ public class CQLSSTableWriter implements Closeable
             // wrapped in a SyncException (see BufferedWriter below). We want to extract that IOE.
             throw (IOException)e.getCause();
         }
+
+        return this;
     }
 
     /**
@@ -539,7 +555,7 @@ public class CQLSSTableWriter implements Closeable
                     Schema.instance.load(ksm.withSwapped(ksm.tables.with(tableMetadata)).withSwapped(types));
                 }
 
-                UpdateStatement preparedInsert = prepareInsert();
+                ModificationStatement preparedInsert = prepareInsert();
 
                 TableMetadataRef ref = TableMetadataRef.forOfflineTools(tableMetadata);
                 AbstractSSTableSimpleWriter writer = sorted
@@ -584,10 +600,10 @@ public class CQLSSTableWriter implements Closeable
          *
          * @return prepared Insert statement and it's bound names
          */
-        private UpdateStatement prepareInsert()
+        private ModificationStatement prepareInsert()
         {
             ClientState state = ClientState.forInternalCalls();
-            UpdateStatement insert = (UpdateStatement) insertStatement.prepare(state);
+            ModificationStatement insert = (ModificationStatement) insertStatement.prepare(state);
             insert.validate(state);
 
             if (insert.hasConditions())

@@ -762,7 +762,7 @@ public abstract class ModificationStatement implements CQLStatement
         }
     }
 
-    Slices createSlices(QueryOptions options)
+    public Slices createSlices(QueryOptions options)
     {
         SortedSet<ClusteringBound> startBounds = restrictions.getClusteringColumnsBounds(Bound.START, options);
         SortedSet<ClusteringBound> endBounds = restrictions.getClusteringColumnsBounds(Bound.END, options);

@@ -640,6 +640,65 @@ public class CQLSSTableWriterTest
         assertFalse(iter.hasNext());
     }
 
+    @Test
+    public void testDeleteStatement() throws Exception
+    {
+        final String KS = "cql_keyspace8";
+        final String TABLE = "table8";
+
+        final String schema = "CREATE TABLE " + KS + "." + TABLE + " ("
+                              + "  k text,"
+                              + "  c1 int,"
+                              + "  c2 int,"
+                              + "  v text,"
+                              + "  PRIMARY KEY (k, c1, c2)"
+                              + ")";
+
+        File tempdir = Files.createTempDir();
+        File dataDir = new File(tempdir.getAbsolutePath() + File.separator + KS + File.separator + TABLE);
+        assert dataDir.mkdirs();
+
+        CQLSSTableWriter updateWriter = CQLSSTableWriter.builder()
+                                                  .inDirectory(dataDir)
+                                                  .forTable(schema)
+                                                  .using(String.format("UPDATE %s.%s SET v=? WHERE k=? AND c1=? AND c2=?", KS, TABLE))
+                                                  .build();
+        CQLSSTableWriter deleteWriter = CQLSSTableWriter.builder()
+                                                  .inDirectory(dataDir)
+                                                  .forTable(schema)
+                                                  .using(String.format("DELETE FROM %s.%s WHERE k=? AND c1=? and c2>=?", KS, TABLE))
+                                                  .build();
+
+        updateWriter.addRow("v0.0", "a", 0, 0);
+        updateWriter.addRow("v0.1", "a", 0, 1);
+        updateWriter.addRow("v0.2", "a", 0, 2);
+        updateWriter.addRow("v0.0", "b", 0, 0);
+        updateWriter.addRow("v0.1", "b", 0, 1);
+        updateWriter.addRow("v0.2", "b", 0, 2);
+        updateWriter.close();
+        deleteWriter.addRow("a", 0, 1);
+        deleteWriter.addRow("b", 0, 2);
+        deleteWriter.close();
+        loadSSTables(dataDir, KS);
+
+        UntypedResultSet resultSet = QueryProcessor.executeInternal("SELECT * FROM " + KS + "." + TABLE);
+        assertEquals(3, resultSet.size());
+
+        Iterator<UntypedResultSet.Row> iter = resultSet.iterator();
+        UntypedResultSet.Row r1 = iter.next();
+        assertEquals("a", r1.getString("k"));
+        assertEquals(0, r1.getInt("c1"));
+        assertEquals(0, r1.getInt("c2"));
+        UntypedResultSet.Row r2 = iter.next();
+        assertEquals("b", r2.getString("k"));
+        assertEquals(0, r2.getInt("c1"));
+        assertEquals(0, r2.getInt("c2"));
+        UntypedResultSet.Row r3 = iter.next();
+        assertEquals("b", r3.getString("k"));
+        assertEquals(0, r3.getInt("c1"));
+        assertEquals(1, r3.getInt("c2"));
+    }
+
     private static void loadSSTables(File dataDir, String ks) throws ExecutionException, InterruptedException
     {
         SSTableLoader loader = new SSTableLoader(dataDir, new SSTableLoader.Client()
